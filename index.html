@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>語頭 つ・す 摩擦検出デバッグ v2.5-energy-normalized</title>
+<title>語頭 つ・す 摩擦検出デバッグ v2.6-pre-roll30ms</title>
 <style>
 :root{
   --bg:#f7f3ea;--card:#fffdf8;--ink:#2b2118;--muted:#756a5d;
@@ -49,10 +49,10 @@ th{background:#f1e7d8}
 </head>
 <body>
 <div class="wrap">
-<h1>語頭 つ・す 摩擦検出デバッグ v2.5-energy-normalized</h1>
+<h1>語頭 つ・す 摩擦検出デバッグ v2.6-pre-roll30ms</h1>
 <p class="small">
 語頭の「す／つ」専用です。録音後に、実際に発音した音を「す」「つ」で入力してください。
-データをためると、固定パラメーター候補を自動計算します。音声もスマホ内のIndexedDBに保存します。摩擦がどこで切れているかを5msごとに保存・表示します。summary.csv と frame_debug.csv をコピーできます。サーバーには送信しません。
+データをためると、固定パラメーター候補を自動計算します。音声もスマホ内のIndexedDBに保存します。摩擦がどこで切れているかを5msごとに保存・表示します。summary.csv と frame_debug.csv をコピーできます。音声開始点の30ms前から解析します。サーバーには送信しません。
 </p>
 
 <section class="card">
@@ -129,7 +129,7 @@ th{background:#f1e7d8}
 
 <section class="card">
   <h2>蓄積データ</h2>
-  <p class="small">特徴量はlocalStorage、音声はIndexedDBに保存されます。同じ端末・同じブラウザなら残ります。摩擦がどこで切れているかを5msごとに保存・表示します。summary.csv と frame_debug.csv をコピーできます。サーバーには送信しません。</p>
+  <p class="small">特徴量はlocalStorage、音声はIndexedDBに保存されます。同じ端末・同じブラウザなら残ります。摩擦がどこで切れているかを5msごとに保存・表示します。summary.csv と frame_debug.csv をコピーできます。音声開始点の30ms前から解析します。サーバーには送信しません。</p>
   <div>
     <button id="clearBtn" class="bad">データを全削除</button>
     <button id="downloadBtn" class="secondary">CSVをダウンロード</button>
@@ -334,7 +334,7 @@ function trimFramesKeepStart(frames){
 function findInitialTargetRange(frames,samples,sr){
   const active=frames.find(f=>f.en>0.045);
   if(!active)return{start:0,end:Math.min(samples.length/sr,0.30)};
-  const start=Math.max(0,active.start-0.025), end=Math.min(samples.length/sr,start+0.28);
+  const start=Math.max(0,active.start-0.055), end=Math.min(samples.length/sr,start+0.28);
   return{start,end};
 }
 function classifyHeadFrames(frames){
