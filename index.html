@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>語頭 つ・す 摩擦検出デバッグ v2.6-pre-roll30ms</title>
+<title>語頭 つ・す 摩擦検出デバッグ v2.7-smoothing</title>
 <style>
 :root{
   --bg:#f7f3ea;--card:#fffdf8;--ink:#2b2118;--muted:#756a5d;
@@ -49,7 +49,7 @@ th{background:#f1e7d8}
 </head>
 <body>
 <div class="wrap">
-<h1>語頭 つ・す 摩擦検出デバッグ v2.6-pre-roll30ms</h1>
+<h1>語頭 つ・す 摩擦検出デバッグ v2.7-smoothing</h1>
 <p class="small">
 語頭の「す／つ」専用です。録音後に、実際に発音した音を「す」「つ」で入力してください。
 データをためると、固定パラメーター候補を自動計算します。音声もスマホ内のIndexedDBに保存します。摩擦がどこで切れているかを5msごとに保存・表示します。summary.csv と frame_debug.csv をコピーできます。音声開始点の30ms前から解析します。サーバーには送信しません。
@@ -243,7 +243,8 @@ async function analyzeBlob(blob){
     const frames=trimFramesKeepStart(framesAll);
     const target=findInitialTargetRange(frames,samples,sr);
     const targetFrames=frames.filter(f=>f.start>=target.start&&f.end<=target.end);
-    const classified=classifyHeadFrames(targetFrames.length?targetFrames:frames);
+    const classifiedRaw=classifyHeadFrames(targetFrames.length?targetFrames:frames);
+    const classified=smoothFrameLabels(classifiedRaw);
     const segments=mergeSegments(classified);
     const m=computeHeadMetrics(samples,sr,classified,segments,target);
     lastMetrics=m;
@@ -297,7 +298,8 @@ function saveFrameDebugRows(item){
     class:f.label,
     energy:+f.en.toFixed(5),
     zcr:+f.zcr.toFixed(5),
-    hp:+(f.hp||0).toFixed(5)
+    hp:+(f.hp||0).toFixed(5),
+    smoothed:f.smoothed ? "yes" : ""
   }));
   frameDebugData.push(...rows);
 }
@@ -346,6 +348,45 @@ function classifyHeadFrames(frames){
     return{...f,label:"other"};
   });
 }
+function smoothFrameLabels(frames){
+  // v2.7:
+  // 5msごとの分類が fric-other-fric / vowel-other-vowel のように
+  // 1フレームだけ揺れる場合、前後の分類に合わせて補正する。
+  // ただし、長い other 区間は残す。
+  const out = frames.map(f=>({...f}));
+  for(let i=1;i<out.length-1;i++){
+    const prev = out[i-1].label;
+    const cur = out[i].label;
+    const next = out[i+1].label;
+
+    // fric の中に1フレームだけ other/vowel が挟まる場合
+    if(prev === "fric" && next === "fric" && cur !== "fric"){
+      out[i].label = "fric";
+      out[i].smoothed = true;
+      continue;
+    }
+
+    // vowel の中に1フレームだけ other が挟まる場合
+    if(prev === "vowel" && next === "vowel" && cur === "other"){
+      out[i].label = "vowel";
+      out[i].smoothed = true;
+      continue;
+    }
+  }
+
+  // 2フレーム幅の小さな穴も軽く埋める
+  // fric other other fric -> fric fric fric fric
+  for(let i=1;i<out.length-2;i++){
+    if(out[i-1].label === "fric" && out[i].label !== "fric" && out[i+1].label !== "fric" && out[i+2].label === "fric"){
+      out[i].label = "fric";
+      out[i+1].label = "fric";
+      out[i].smoothed = true;
+      out[i+1].smoothed = true;
+    }
+  }
+  return out;
+}
+
 function mergeSegments(frames){
   const segs=[];
   for(const f of frames){
@@ -618,7 +659,7 @@ async function copyCSVText(){
 }
 
 function makeFrameCSVText(){
-  const header=["id","time","word","label","frame","startMs","endMs","class","energy","zcr","hp"];
+  const header=["id","time","word","label","frame","startMs","endMs","class","energy","zcr","hp","smoothed"];
   const lines=[header.join(",")].concat(frameDebugData.map(d=>header.map(k=>csvCell(d[k]??"")).join(",")));
   return lines.join("\n");
 }
@@ -685,6 +726,7 @@ function renderFrameDebug(frames){
       <td>${i}</td>
       <td>${ms0}-${ms1}</td>
       <td>${lab}</td>
+      <td>${f.smoothed ? 'yes' : ''}</td>
       <td>${f.en.toFixed(3)}</td>
       <td>${f.zcr.toFixed(3)}</td>
       <td>${(f.hp||0).toFixed(3)}</td>
@@ -692,7 +734,7 @@ function renderFrameDebug(frames){
   }).join("");
 
   $("frameDebugTable").innerHTML =
-    `<tr><th>#</th><th>ms</th><th>分類</th><th>energy</th><th>ZCR</th><th>高域近似</th></tr>` + rows;
+    `<tr><th>#</th><th>ms</th><th>分類</th><th>補正</th><th>energy</th><th>ZCR</th><th>高域近似</th></tr>` + rows;
 }
 
 function showMetrics(m){
