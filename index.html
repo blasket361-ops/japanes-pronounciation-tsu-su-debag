@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>語頭 つ・す 摩擦検出デバッグ v1</title>
+<title>語頭 つ・す 摩擦検出デバッグ v2</title>
 <style>
 :root{
   --bg:#f7f3ea;--card:#fffdf8;--ink:#2b2118;--muted:#756a5d;
@@ -49,10 +49,10 @@ th{background:#f1e7d8}
 </head>
 <body>
 <div class="wrap">
-<h1>語頭 つ・す 摩擦検出デバッグ v1</h1>
+<h1>語頭 つ・す 摩擦検出デバッグ v2</h1>
 <p class="small">
 語頭の「す／つ」専用です。録音後に、実際に発音した音を「す」「つ」で入力してください。
-データをためると、固定パラメーター候補を自動計算します。音声もスマホ内のIndexedDBに保存します。摩擦がどこで切れているかを5msごとに表示します。サーバーには送信しません。
+データをためると、固定パラメーター候補を自動計算します。音声もスマホ内のIndexedDBに保存します。摩擦がどこで切れているかを5msごとに保存・表示します。summary.csv と frame_debug.csv をコピーできます。サーバーには送信しません。
 </p>
 
 <section class="card">
@@ -129,12 +129,14 @@ th{background:#f1e7d8}
 
 <section class="card">
   <h2>蓄積データ</h2>
-  <p class="small">特徴量はlocalStorage、音声はIndexedDBに保存されます。同じ端末・同じブラウザなら残ります。摩擦がどこで切れているかを5msごとに表示します。サーバーには送信しません。</p>
+  <p class="small">特徴量はlocalStorage、音声はIndexedDBに保存されます。同じ端末・同じブラウザなら残ります。摩擦がどこで切れているかを5msごとに保存・表示します。summary.csv と frame_debug.csv をコピーできます。サーバーには送信しません。</p>
   <div>
     <button id="clearBtn" class="bad">データを全削除</button>
     <button id="downloadBtn" class="secondary">CSVをダウンロード</button>
     <button id="showCsvBtn" class="secondary">CSVを画面に表示</button>
-    <button id="copyCsvBtn" class="secondary">CSVをコピー</button>
+    <button id="copyCsvBtn" class="secondary">summary CSVをコピー</button>
+    <button id="showFrameCsvBtn" class="secondary">frame_debug CSVを表示</button>
+    <button id="copyFrameCsvBtn" class="secondary">frame_debug CSVをコピー</button>
     <button id="downloadLastAudioBtn" class="secondary" disabled>最後の音声をダウンロード</button>
     <button id="downloadAllAudioBtn" class="secondary">音声を順番にダウンロード</button>
   </div>
@@ -144,7 +146,9 @@ th{background:#f1e7d8}
   </div>
   <div style="margin-top:12px">
     <p class="small"><b>iPhone用：</b>「CSVを画面に表示」を押すと、下にCSV本文が出ます。長押し→全選択→コピー、または「CSVをコピー」を使ってください。</p>
-    <textarea id="csvTextBox" readonly placeholder="ここにCSV本文が表示されます。"></textarea>
+    <textarea id="csvTextBox" readonly placeholder="ここにsummary CSV本文が表示されます。"></textarea>
+    <p class="small"><b>frame_debug:</b> 各サンプルの5msごとの分類・energy・ZCR・高域近似です。</p>
+    <textarea id="frameCsvTextBox" readonly placeholder="ここにframe_debug CSV本文が表示されます。"></textarea>
   </div>
 </section>
 
@@ -166,6 +170,9 @@ const $=id=>document.getElementById(id);
 let stream=null,recorder=null,chunks=[],audioCtx=null,analyser=null,vadInterval=null,heardVoice=false,silenceStart=null;
 let lastMetrics=null;
 let samplesData = JSON.parse(localStorage.getItem("tsuSuCalibrationDataV1")||"[]");
+let frameDebugData = JSON.parse(localStorage.getItem("tsuSuFrameDebugDataV1")||"[]");
+let lastDebugFrames = [];
+let lastSampleId = "";
 let lastAudioBlob = null;
 let lastAudioMime = "audio/webm";
 let dbPromise = openAudioDB();
@@ -175,10 +182,12 @@ $("recordBtn").onclick=()=>startRecording();
 $("stopBtn").onclick=()=>stopRecording();
 $("saveSuBtn").onclick=()=>saveCurrent("su");
 $("saveTsuBtn").onclick=()=>saveCurrent("tsu");
-$("clearBtn").onclick=()=>{ if(confirm("全データを削除しますか？")){samplesData=[]; persist(); clearAudioDB(); renderAll();} };
+$("clearBtn").onclick=()=>{ if(confirm("全データを削除しますか？")){samplesData=[]; frameDebugData=[]; persist(); clearAudioDB(); renderAll();} };
 $("downloadBtn").onclick=downloadCSV;
 $("showCsvBtn").onclick=showCSVText;
 $("copyCsvBtn").onclick=copyCSVText;
+$("showFrameCsvBtn").onclick=showFrameCSVText;
+$("copyFrameCsvBtn").onclick=copyFrameCSVText;
 $("downloadLastAudioBtn").onclick=downloadLastAudio;
 $("downloadAllAudioBtn").onclick=downloadAllAudioSequential;
 
@@ -256,42 +265,48 @@ async function analyzeBlob(blob){
 async function saveCurrent(label){
   if(!lastMetrics) return;
   const id = makeSampleId(samplesData.length + 1);
+  lastSampleId = id;
   const item={
     id,
     time:new Date().toISOString(),
     word:$("wordSelect").value,
     label,
-    audioFile:`${id}_${$("wordSelect").value}_${label}.${audioExt(lastAudioMime)}`,
+    audioFile:"",
     rise:+lastMetrics.rise.toFixed(4),
     fricMs:+lastMetrics.fricMs.toFixed(2),
     burst:+lastMetrics.burstScore.toFixed(4),
     centroid:+lastMetrics.centroid.toFixed(2),
     highRatio:+lastMetrics.highRatio.toFixed(4)
   };
+  samplesData.push(item);
+  saveFrameDebugRows(item);
+  persist(); renderAll();
+  $("status").textContent=`保存しました：${item.word} / ${label==="tsu"?"つ":"す"}（summary ${samplesData.length}件、frame ${frameDebugData.length}行）`;
+}
 
-  try{
-    if(lastAudioBlob){
-      await saveAudioBlob(item.id, lastAudioBlob, item);
-    }
-    samplesData.push(item);
-    persist(); renderAll();
-    $("status").textContent=`保存しました：${item.word} / ${label==="tsu"?"つ":"す"}（${samplesData.length}件）`;
-  }catch(e){
-    console.error(e);
-    alert("音声保存に失敗しました: " + (e.message || e));
-  }
+function saveFrameDebugRows(item){
+  if(!lastDebugFrames || !lastDebugFrames.length) return;
+  const rows = lastDebugFrames.map((f,i)=>({
+    id:item.id,
+    time:item.time,
+    word:item.word,
+    label:item.label,
+    frame:i,
+    startMs:+f.relStartMs.toFixed(2),
+    endMs:+f.relEndMs.toFixed(2),
+    class:f.label,
+    energy:+f.en.toFixed(5),
+    zcr:+f.zcr.toFixed(5),
+    hp:+(f.hp||0).toFixed(5)
+  }));
+  frameDebugData.push(...rows);
 }
 
 function makeSampleId(n){
   return "sample_" + String(n).padStart(4,"0");
 }
-function audioExt(mime){
-  if((mime||"").includes("mp4")) return "m4a";
-  if((mime||"").includes("ogg")) return "ogg";
-  return "webm";
-}
 
-function persist(){localStorage.setItem("tsuSuCalibrationDataV1",JSON.stringify(samplesData));}
+function persist(){localStorage.setItem("tsuSuCalibrationDataV1",JSON.stringify(samplesData));localStorage.setItem("tsuSuFrameDebugDataV1",JSON.stringify(frameDebugData));}
 
 function makeFrames(samples,sr){
   const frameMs=5, size=Math.max(96,Math.floor(sr*frameMs/1000)), frames=[];
@@ -469,7 +484,7 @@ function renderAll(){
   renderTable(); renderSummary();
 }
 function renderTable(){
-  $("countInfo").textContent=`全${samplesData.length}件（す ${samplesData.filter(d=>d.label==="su").length}件／つ ${samplesData.filter(d=>d.label==="tsu").length}件）`;
+  $("countInfo").textContent=`summary 全${samplesData.length}件（す ${samplesData.filter(d=>d.label==="su").length}件／つ ${samplesData.filter(d=>d.label==="tsu").length}件）／frame ${frameDebugData.length}行`;
   const rows=samplesData.slice(-80).reverse();
   $("dataTable").innerHTML = `<tr><th>ID</th><th>語</th><th>正解</th><th>立上</th><th>摩擦ms</th><th>破裂</th><th>重心Hz</th><th>高域</th></tr>`+
     rows.map(d=>`<tr><td>${d.id||""}</td><td>${d.word}</td><td>${d.label==="tsu"?"つ":"す"}</td><td>${d.rise}</td><td>${d.fricMs}</td><td>${d.burst}</td><td>${Math.round(d.centroid)}</td><td>${d.highRatio}</td></tr>`).join("");
@@ -602,6 +617,27 @@ async function copyCSVText(){
   }
 }
 
+function makeFrameCSVText(){
+  const header=["id","time","word","label","frame","startMs","endMs","class","energy","zcr","hp"];
+  const lines=[header.join(",")].concat(frameDebugData.map(d=>header.map(k=>csvCell(d[k]??"")).join(",")));
+  return lines.join("\n");
+}
+function showFrameCSVText(){
+  const text = makeFrameCSVText();
+  const box = $("frameCsvTextBox");
+  box.value = text;
+  box.focus();
+  box.select();
+  $("status").textContent = `frame_debug CSVを表示しました（${frameDebugData.length}行）。`;
+}
+async function copyFrameCSVText(){
+  const text = makeFrameCSVText();
+  const box = $("frameCsvTextBox");
+  box.value = text;
+  try{ await navigator.clipboard.writeText(text); $("status").textContent = `frame_debug CSVをコピーしました（${frameDebugData.length}行）。`; }
+  catch(e){ box.focus(); box.select(); $("status").textContent = "自動コピーできませんでした。下のframe_debug CSVを長押ししてコピーしてください。"; }
+}
+
 function downloadCSV(){
   const csv = makeCSVText();
   const blob=new Blob([csv],{type:"text/csv;charset=utf-8"});
@@ -613,6 +649,17 @@ function downloadCSV(){
 }
 
 function renderFrameDebug(frames){
+  if(!frames || !frames.length){
+    lastDebugFrames = [];
+    return;
+  }
+  const baseStart = frames[0].start;
+  lastDebugFrames = frames.map(f=>({
+    ...f,
+    relStartMs:(f.start-baseStart)*1000,
+    relEndMs:(f.end-baseStart)*1000
+  }));
+
   const fricCount = frames.filter(f=>f.label==="fric").length;
   const vowelCount = frames.filter(f=>f.label==="vowel").length;
   const otherCount = frames.filter(f=>f.label==="other").length;
@@ -630,9 +677,9 @@ function renderFrameDebug(frames){
   }
   $("dbgFirstFricRun").textContent = firstRun ? `${firstRun} frames / ${Math.round(firstRun*5)}ms` : "なし";
 
-  const rows = frames.map((f,i)=>{
-    const ms0 = Math.round((f.start - frames[0].start) * 1000);
-    const ms1 = Math.round((f.end - frames[0].start) * 1000);
+  const rows = lastDebugFrames.map((f,i)=>{
+    const ms0 = Math.round(f.relStartMs);
+    const ms1 = Math.round(f.relEndMs);
     const lab = f.label === "fric" ? "摩擦" : (f.label === "vowel" ? "母音" : "その他");
     return `<tr>
       <td>${i}</td>
