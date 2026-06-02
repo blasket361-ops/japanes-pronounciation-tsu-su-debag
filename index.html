@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>語頭 つ・す 摩擦検出デバッグ v2.7-smoothing</title>
+<title>語頭 つ・す 摩擦検出デバッグ v3.0-rise-steady</title>
 <style>
 :root{
   --bg:#f7f3ea;--card:#fffdf8;--ink:#2b2118;--muted:#756a5d;
@@ -49,10 +49,10 @@ th{background:#f1e7d8}
 </head>
 <body>
 <div class="wrap">
-<h1>語頭 つ・す 摩擦検出デバッグ v2.7-smoothing</h1>
+<h1>語頭 つ・す 摩擦検出デバッグ v3.0-rise-steady</h1>
 <p class="small">
 語頭の「す／つ」専用です。録音後に、実際に発音した音を「す」「つ」で入力してください。
-データをためると、固定パラメーター候補を自動計算します。音声もスマホ内のIndexedDBに保存します。摩擦がどこで切れているかを5msごとに保存・表示します。summary.csv と frame_debug.csv をコピーできます。音声開始点の30ms前から解析します。サーバーには送信しません。
+データをためると、固定パラメーター候補を自動計算します。音声もスマホ内のIndexedDBに保存します。摩擦がどこで切れているかを5msごとに保存・表示します。summary.csv と frame_debug.csv をコピーできます。摩擦包絡線から rise duration / steady+decay duration を推定します。サーバーには送信しません。
 </p>
 
 <section class="card">
@@ -124,12 +124,15 @@ th{background:#f1e7d8}
     <div class="metric"><b>スペクトル重心</b><span id="mCentroid">-</span></div>
     <div class="metric"><b>高域比率 5–9kHz</b><span id="mHigh">-</span></div>
     <div class="metric"><b>仮判定</b><span id="mGuess">-</span></div>
+    <div class="metric"><b>rise duration</b><span id="mRiseDur">-</span></div>
+    <div class="metric"><b>steady+decay</b><span id="mSteadyDecay">-</span></div>
+    <div class="metric"><b>rise slope</b><span id="mRiseSlope">-</span></div>
   </div>
 </section>
 
 <section class="card">
   <h2>蓄積データ</h2>
-  <p class="small">特徴量はlocalStorage、音声はIndexedDBに保存されます。同じ端末・同じブラウザなら残ります。摩擦がどこで切れているかを5msごとに保存・表示します。summary.csv と frame_debug.csv をコピーできます。音声開始点の30ms前から解析します。サーバーには送信しません。</p>
+  <p class="small">特徴量はlocalStorage、音声はIndexedDBに保存されます。同じ端末・同じブラウザなら残ります。摩擦がどこで切れているかを5msごとに保存・表示します。summary.csv と frame_debug.csv をコピーできます。摩擦包絡線から rise duration / steady+decay duration を推定します。サーバーには送信しません。</p>
   <div>
     <button id="clearBtn" class="bad">データを全削除</button>
     <button id="downloadBtn" class="secondary">CSVをダウンロード</button>
@@ -243,8 +246,7 @@ async function analyzeBlob(blob){
     const frames=trimFramesKeepStart(framesAll);
     const target=findInitialTargetRange(frames,samples,sr);
     const targetFrames=frames.filter(f=>f.start>=target.start&&f.end<=target.end);
-    const classifiedRaw=classifyHeadFrames(targetFrames.length?targetFrames:frames);
-    const classified=smoothFrameLabels(classifiedRaw);
+    const classified=classifyHeadFrames(targetFrames.length?targetFrames:frames);
     const segments=mergeSegments(classified);
     const m=computeHeadMetrics(samples,sr,classified,segments,target);
     lastMetrics=m;
@@ -277,7 +279,11 @@ async function saveCurrent(label){
     fricMs:+lastMetrics.fricMs.toFixed(2),
     burst:+lastMetrics.burstScore.toFixed(4),
     centroid:+lastMetrics.centroid.toFixed(2),
-    highRatio:+lastMetrics.highRatio.toFixed(4)
+    highRatio:+lastMetrics.highRatio.toFixed(4),
+    fricTotalMs:+(lastMetrics.fricTotalMs||0).toFixed(2),
+    riseDurationMs:+(lastMetrics.riseDurationMs||0).toFixed(2),
+    steadyDecayMs:+(lastMetrics.steadyDecayMs||0).toFixed(2),
+    riseSlope:+(lastMetrics.riseSlope||0).toFixed(6)
   };
   samplesData.push(item);
   saveFrameDebugRows(item);
@@ -298,8 +304,7 @@ function saveFrameDebugRows(item){
     class:f.label,
     energy:+f.en.toFixed(5),
     zcr:+f.zcr.toFixed(5),
-    hp:+(f.hp||0).toFixed(5),
-    smoothed:f.smoothed ? "yes" : ""
+    hp:+(f.hp||0).toFixed(5)
   }));
   frameDebugData.push(...rows);
 }
@@ -348,45 +353,6 @@ function classifyHeadFrames(frames){
     return{...f,label:"other"};
   });
 }
-function smoothFrameLabels(frames){
-  // v2.7:
-  // 5msごとの分類が fric-other-fric / vowel-other-vowel のように
-  // 1フレームだけ揺れる場合、前後の分類に合わせて補正する。
-  // ただし、長い other 区間は残す。
-  const out = frames.map(f=>({...f}));
-  for(let i=1;i<out.length-1;i++){
-    const prev = out[i-1].label;
-    const cur = out[i].label;
-    const next = out[i+1].label;
-
-    // fric の中に1フレームだけ other/vowel が挟まる場合
-    if(prev === "fric" && next === "fric" && cur !== "fric"){
-      out[i].label = "fric";
-      out[i].smoothed = true;
-      continue;
-    }
-
-    // vowel の中に1フレームだけ other が挟まる場合
-    if(prev === "vowel" && next === "vowel" && cur === "other"){
-      out[i].label = "vowel";
-      out[i].smoothed = true;
-      continue;
-    }
-  }
-
-  // 2フレーム幅の小さな穴も軽く埋める
-  // fric other other fric -> fric fric fric fric
-  for(let i=1;i<out.length-2;i++){
-    if(out[i-1].label === "fric" && out[i].label !== "fric" && out[i+1].label !== "fric" && out[i+2].label === "fric"){
-      out[i].label = "fric";
-      out[i+1].label = "fric";
-      out[i].smoothed = true;
-      out[i+1].smoothed = true;
-    }
-  }
-  return out;
-}
-
 function mergeSegments(frames){
   const segs=[];
   for(const f of frames){
@@ -402,6 +368,87 @@ function mergeSegments(frames){
   }
   return merged;
 }
+function computeFricEnvelopeFeatures(frames){
+  // v3.0:
+  // 摩擦区間の包絡線から rise / steady+decay を推定する。
+  // 参照発想：
+  // [s] は摩擦がゆっくり長く続きやすく、
+  // [ts] は摩擦の立ち上がりが急で rise が短くなりやすい。
+  //
+  // 注意：
+  // ここでは厳密な音声学的分節ではなく、ブラウザ内で動く簡易推定。
+  const fricIdx = frames.map((f,i)=>f.label==="fric"?i:-1).filter(i=>i>=0);
+  if(!fricIdx.length){
+    return {
+      fricTotalMs:0,
+      riseDurationMs:0,
+      steadyDecayMs:0,
+      riseSlope:0,
+      fricPeakNorm:0,
+      fricStartMs:null,
+      fricEndMs:null
+    };
+  }
+
+  // 最初の fric 連続区間を取る
+  const start = fricIdx[0];
+  let end = start;
+  for(let i=start+1;i<frames.length;i++){
+    if(frames[i].label==="fric") end=i;
+    else break;
+  }
+
+  const seg = frames.slice(start,end+1);
+  if(!seg.length){
+    return {
+      fricTotalMs:0,
+      riseDurationMs:0,
+      steadyDecayMs:0,
+      riseSlope:0,
+      fricPeakNorm:0,
+      fricStartMs:null,
+      fricEndMs:null
+    };
+  }
+
+  // 包絡線：zcr と hp を主に使い、energy正規化も少しだけ使う
+  // hp は簡易高域近似、zcr は零交差率。
+  // どちらも値域はおおむね0〜1に近い。
+  const scores = seg.map(f=>{
+    const normEn = (typeof f.normEn === "number") ? f.normEn : f.en;
+    return Math.max(0, Math.min(1, 0.45*f.zcr + 0.45*(f.hp||0) + 0.10*normEn));
+  });
+
+  const peak = Math.max(...scores, 1e-9);
+  const norm = scores.map(x=>x/peak);
+
+  // 立ち上がり終了点：
+  // peakの70%に初めて到達したところ。
+  // ただし短すぎる場合もあるので最低1フレームは確保。
+  let riseEnd = norm.findIndex(x=>x>=0.70);
+  if(riseEnd < 0) riseEnd = Math.min(norm.length-1, 1);
+
+  const frameMs = Math.round((seg[0].end-seg[0].start)*1000) || 5;
+  const fricTotalMs = norm.length * frameMs;
+  const riseDurationMs = Math.max(frameMs, (riseEnd+1)*frameMs);
+  const steadyDecayMs = Math.max(0, fricTotalMs - riseDurationMs);
+
+  // rise slope：最初から70%到達までの平均上昇速度
+  const firstVal = norm[0] || 0;
+  const riseVal = norm[riseEnd] || peak;
+  const riseSlope = riseDurationMs > 0 ? (riseVal - firstVal) / riseDurationMs : 0;
+
+  return {
+    fricTotalMs,
+    riseDurationMs,
+    steadyDecayMs,
+    riseSlope,
+    fricPeakNorm:peak,
+    fricStartMs:Math.round((seg[0].start - frames[0].start)*1000),
+    fricEndMs:Math.round((seg[seg.length-1].end - frames[0].start)*1000)
+  };
+}
+
 function computeHeadMetrics(samples,sr,frames,segments,target){
   const activeIndex=frames.findIndex(f=>f.en>0.045);
   let rise=0;
@@ -433,7 +480,8 @@ function computeHeadMetrics(samples,sr,frames,segments,target){
     const spec=spectrumSummary(samples.slice(i0,i1),sr);
     centroid=spec.centroid; highRatio=spec.highRatio;
   }
-  return{rise,fric,fricMs:fric*1000,burstScore,centroid,highRatio};
+  const env = computeFricEnvelopeFeatures(frames);
+  return{rise,fric,fricMs:fric*1000,burstScore,centroid,highRatio,...env};
 }
 function spectrumSummary(x,sr){
   const N=1024, buf=new Float32Array(N);
@@ -453,7 +501,7 @@ function dftMagnitude(x){
 
 function calcStats(){
   const su=samplesData.filter(d=>d.label==="su"), tsu=samplesData.filter(d=>d.label==="tsu");
-  const features=["rise","fricMs","burst","centroid","highRatio"];
+  const features=["rise","fricMs","burst","centroid","highRatio","fricTotalMs","riseDurationMs","steadyDecayMs","riseSlope"];
   const stats={su:{n:su.length},tsu:{n:tsu.length},features:{}};
   for(const f of features){
     const a=su.map(d=>+d[f]).filter(Number.isFinite), b=tsu.map(d=>+d[f]).filter(Number.isFinite);
@@ -527,8 +575,8 @@ function renderAll(){
 function renderTable(){
   $("countInfo").textContent=`summary 全${samplesData.length}件（す ${samplesData.filter(d=>d.label==="su").length}件／つ ${samplesData.filter(d=>d.label==="tsu").length}件）／frame ${frameDebugData.length}行`;
   const rows=samplesData.slice(-80).reverse();
-  $("dataTable").innerHTML = `<tr><th>ID</th><th>語</th><th>正解</th><th>立上</th><th>摩擦ms</th><th>破裂</th><th>重心Hz</th><th>高域</th></tr>`+
-    rows.map(d=>`<tr><td>${d.id||""}</td><td>${d.word}</td><td>${d.label==="tsu"?"つ":"す"}</td><td>${d.rise}</td><td>${d.fricMs}</td><td>${d.burst}</td><td>${Math.round(d.centroid)}</td><td>${d.highRatio}</td></tr>`).join("");
+  $("dataTable").innerHTML = `<tr><th>ID</th><th>語</th><th>正解</th><th>立上</th><th>摩擦ms</th><th>riseDur</th><th>steadyDecay</th><th>破裂</th><th>重心Hz</th><th>高域</th></tr>`+
+    rows.map(d=>`<tr><td>${d.id||""}</td><td>${d.word}</td><td>${d.label==="tsu"?"つ":"す"}</td><td>${d.rise}</td><td>${d.fricMs}</td><td>${d.riseDurationMs??""}</td><td>${d.steadyDecayMs??""}</td><td>${d.burst}</td><td>${Math.round(d.centroid)}</td><td>${d.highRatio}</td></tr>`).join("");
 }
 function renderSummary(){
   const suN=samplesData.filter(d=>d.label==="su").length, tsuN=samplesData.filter(d=>d.label==="tsu").length;
@@ -537,7 +585,7 @@ function renderSummary(){
     $("paramText").value="";
     return;
   }
-  const st=calcStats(), names={rise:"立ち上がり",fricMs:"摩擦時間ms",burst:"破裂スコア",centroid:"重心Hz",highRatio:"高域比率"};
+  const st=calcStats(), names={rise:"立ち上がり",fricMs:"摩擦時間ms",burst:"破裂スコア",centroid:"重心Hz",highRatio:"高域比率",fricTotalMs:"摩擦合計ms",riseDurationMs:"rise duration",steadyDecayMs:"steady+decay",riseSlope:"rise slope"};
   let html=`<table><tr><th>特徴量</th><th>す平均</th><th>つ平均</th><th>推奨閾値</th><th>方向</th><th>単独識別率</th></tr>`;
   for(const key of Object.keys(st.features)){
     const x=st.features[key];
@@ -628,7 +676,7 @@ async function downloadAllAudioSequential(){
 }
 
 function makeCSVText(){
-  const header=["id","time","word","label","audioFile","rise","fricMs","burst","centroid","highRatio"];
+  const header=["id","time","word","label","audioFile","rise","fricMs","burst","centroid","highRatio","fricTotalMs","riseDurationMs","steadyDecayMs","riseSlope"];
   const lines=[header.join(",")].concat(samplesData.map(d=>header.map(k=>csvCell(d[k]??"")).join(",")));
   return lines.join("\n");
 }
@@ -659,7 +707,7 @@ async function copyCSVText(){
 }
 
 function makeFrameCSVText(){
-  const header=["id","time","word","label","frame","startMs","endMs","class","energy","zcr","hp","smoothed"];
+  const header=["id","time","word","label","frame","startMs","endMs","class","energy","zcr","hp"];
   const lines=[header.join(",")].concat(frameDebugData.map(d=>header.map(k=>csvCell(d[k]??"")).join(",")));
   return lines.join("\n");
 }
@@ -726,7 +774,6 @@ function renderFrameDebug(frames){
       <td>${i}</td>
       <td>${ms0}-${ms1}</td>
       <td>${lab}</td>
-      <td>${f.smoothed ? 'yes' : ''}</td>
       <td>${f.en.toFixed(3)}</td>
       <td>${f.zcr.toFixed(3)}</td>
       <td>${(f.hp||0).toFixed(3)}</td>
@@ -734,7 +781,7 @@ function renderFrameDebug(frames){
   }).join("");
 
   $("frameDebugTable").innerHTML =
-    `<tr><th>#</th><th>ms</th><th>分類</th><th>補正</th><th>energy</th><th>ZCR</th><th>高域近似</th></tr>` + rows;
+    `<tr><th>#</th><th>ms</th><th>分類</th><th>energy</th><th>ZCR</th><th>高域近似</th></tr>` + rows;
 }
 
 function showMetrics(m){
@@ -743,6 +790,9 @@ function showMetrics(m){
   $("mBurst").textContent=m.burstScore.toFixed(2);
   $("mCentroid").textContent=m.centroid?Math.round(m.centroid)+" Hz":"-";
   $("mHigh").textContent=m.highRatio?Math.round(m.highRatio*100)+" %":"-";
+  if($("mRiseDur")) $("mRiseDur").textContent = Math.round(m.riseDurationMs||0) + " ms";
+  if($("mSteadyDecay")) $("mSteadyDecay").textContent = Math.round(m.steadyDecayMs||0) + " ms";
+  if($("mRiseSlope")) $("mRiseSlope").textContent = (m.riseSlope||0).toFixed(4);
 }
 function drawWaveRegion(samples,sr,startSec,endSec){
   const c=$("waveCanvas"),g=c.getContext("2d");g.clearRect(0,0,c.width,c.height);
