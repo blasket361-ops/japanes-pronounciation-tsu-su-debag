@@ -1,0 +1,829 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>語頭 つ・す 摩擦検出デバッグ v3.0-rise-steady</title>
+<style>
+:root{
+  --bg:#f7f3ea;--card:#fffdf8;--ink:#2b2118;--muted:#756a5d;
+  --ok:#2e8b57;--bad:#b84a39;--line:#e2d7c8;
+  --fric:#37a779;--vowel:#f2c14e;--other:#c7b8a8;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,-apple-system,"Segoe UI","Hiragino Sans","Yu Gothic",sans-serif}
+.wrap{max-width:1100px;margin:0 auto;padding:22px}
+h1{font-size:27px;margin:0 0 8px}
+h2{font-size:20px;margin:0 0 12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:18px;margin:14px 0;box-shadow:0 2px 8px #0000000a}
+.small{font-size:13px;color:var(--muted);line-height:1.7}
+button{border:0;border-radius:14px;padding:12px 16px;font-weight:800;cursor:pointer;margin:4px;background:#2f2a24;color:white}
+button.secondary{background:#fff;color:var(--ink);border:1px solid var(--line)}
+button.ok{background:var(--ok)}
+button.bad{background:var(--bad)}
+button:disabled{opacity:.45;cursor:not-allowed}
+input,select,textarea{border:1px solid var(--line);border-radius:12px;padding:10px;font-size:15px;background:white}
+textarea{width:100%;min-height:120px;font-family:ui-monospace,Consolas,monospace}
+.bigWord{text-align:center;font-size:52px;font-weight:900;letter-spacing:.08em;margin:10px 0}
+.result{font-size:18px;font-weight:800;padding:14px;border-radius:14px;background:white;border:1px solid var(--line)}
+canvas{width:100%;height:260px;background:white;border:1px solid var(--line);border-radius:14px}
+.bar{height:64px;background:white;border:1px solid var(--line);border-radius:14px;display:flex;overflow:hidden}
+.seg{display:flex;align-items:center;justify-content:center;text-align:center;font-size:12px;font-weight:800;border-right:2px solid white;min-width:4px}
+.fric{background:var(--fric)}.vowel{background:var(--vowel)}.other{background:var(--other)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}
+.metric{background:white;border:1px solid var(--line);border-radius:14px;padding:12px}
+.metric b{display:block;font-size:13px;color:var(--muted);margin-bottom:4px}
+table{border-collapse:collapse;width:100%;background:white;border-radius:12px;overflow:hidden}
+th,td{border:1px solid var(--line);padding:8px;font-size:13px;text-align:right}
+th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}
+th{background:#f1e7d8}
+.hidden{display:none}
+.warn{color:var(--bad);font-weight:800}
+@media(max-width:640px){
+  .wrap{padding:12px}h1{font-size:22px}.card{padding:14px;border-radius:16px}
+  button{width:100%;margin:5px 0;padding:14px 12px;font-size:17px}.bigWord{font-size:44px}
+  .grid{grid-template-columns:1fr 1fr}canvas{height:230px}
+}
+@media(max-width:380px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>語頭 つ・す 摩擦検出デバッグ v3.0-rise-steady</h1>
+<p class="small">
+語頭の「す／つ」専用です。録音後に、実際に発音した音を「す」「つ」で入力してください。
+データをためると、固定パラメーター候補を自動計算します。音声もスマホ内のIndexedDBに保存します。摩擦がどこで切れているかを5msごとに保存・表示します。summary.csv と frame_debug.csv をコピーできます。摩擦包絡線から rise duration / steady+decay duration を推定します。サーバーには送信しません。
+</p>
+
+<section class="card">
+  <h2>録音</h2>
+  <div class="grid">
+    <div>
+      <label class="small">発音した語</label><br>
+      <select id="wordSelect">
+        <option value="すり">すり</option><option value="つり">つり</option>
+        <option value="すかう">すかう</option><option value="つかう">つかう</option>
+        <option value="すける">すける</option><option value="つける">つける</option>
+        <option value="すぎ">すぎ</option><option value="つぎ">つぎ</option>
+        <option value="すめる">すめる</option><option value="つめる">つめる</option>
+      </select>
+    </div>
+    <div>
+      <label class="small">正解ラベル</label><br>
+      <select id="labelSelect">
+        <option value="su">す</option>
+        <option value="tsu">つ</option>
+      </select>
+    </div>
+  </div>
+  <div class="bigWord" id="displayWord">すり</div>
+  <div>
+    <button id="recordBtn">録音開始</button>
+    <button id="stopBtn" class="bad" disabled>手動停止</button>
+    <button id="saveSuBtn" class="secondary" disabled>この録音を「す」として保存</button>
+    <button id="saveTsuBtn" class="ok" disabled>この録音を「つ」として保存</button>
+  </div>
+  <p id="status" class="small">録音後、特徴量が表示されます。</p>
+  <div id="lastResult" class="result hidden"></div>
+</section>
+
+<section class="card">
+  <h2>波形：語頭の対象部分</h2>
+  <canvas id="waveCanvas" width="1200" height="380"></canvas>
+</section>
+
+<section class="card">
+  <h2>音の構造</h2>
+  <div class="bar" id="segmentBar"><div class="seg other" style="width:100%">録音後に表示</div></div>
+  <p class="small">緑＝摩擦候補、黄＝母音/有声部、茶＝その他。語頭版では閉鎖時間は判定に使いません。</p>
+</section>
+
+<section class="card">
+  <h2>摩擦検出デバッグ</h2>
+  <p class="small">
+    5msごとのフレームを表示します。明らかに「すり」なのに摩擦が10msになる場合、
+    どの時点で fric（摩擦）が vowel（母音）や other（その他）に変わっているかを見ます。
+  </p>
+  <div class="grid">
+    <div class="metric"><b>fric フレーム数</b><span id="dbgFricCount">-</span></div>
+    <div class="metric"><b>vowel フレーム数</b><span id="dbgVowelCount">-</span></div>
+    <div class="metric"><b>other フレーム数</b><span id="dbgOtherCount">-</span></div>
+    <div class="metric"><b>最初の摩擦連続</b><span id="dbgFirstFricRun">-</span></div>
+  </div>
+  <div style="overflow:auto;max-height:360px;margin-top:10px">
+    <table id="frameDebugTable"></table>
+  </div>
+</section>
+
+<section class="card">
+  <h2>現在の録音の特徴量</h2>
+  <div class="grid">
+    <div class="metric"><b>立ち上がり係数</b><span id="mRise">-</span></div>
+    <div class="metric"><b>摩擦時間</b><span id="mFric">-</span></div>
+    <div class="metric"><b>破裂スコア</b><span id="mBurst">-</span></div>
+    <div class="metric"><b>スペクトル重心</b><span id="mCentroid">-</span></div>
+    <div class="metric"><b>高域比率 5–9kHz</b><span id="mHigh">-</span></div>
+    <div class="metric"><b>仮判定</b><span id="mGuess">-</span></div>
+    <div class="metric"><b>rise duration</b><span id="mRiseDur">-</span></div>
+    <div class="metric"><b>steady+decay</b><span id="mSteadyDecay">-</span></div>
+    <div class="metric"><b>rise slope</b><span id="mRiseSlope">-</span></div>
+  </div>
+</section>
+
+<section class="card">
+  <h2>蓄積データ</h2>
+  <p class="small">特徴量はlocalStorage、音声はIndexedDBに保存されます。同じ端末・同じブラウザなら残ります。摩擦がどこで切れているかを5msごとに保存・表示します。summary.csv と frame_debug.csv をコピーできます。摩擦包絡線から rise duration / steady+decay duration を推定します。サーバーには送信しません。</p>
+  <div>
+    <button id="clearBtn" class="bad">データを全削除</button>
+    <button id="downloadBtn" class="secondary">CSVをダウンロード</button>
+    <button id="showCsvBtn" class="secondary">CSVを画面に表示</button>
+    <button id="copyCsvBtn" class="secondary">summary CSVをコピー</button>
+    <button id="showFrameCsvBtn" class="secondary">frame_debug CSVを表示</button>
+    <button id="copyFrameCsvBtn" class="secondary">frame_debug CSVをコピー</button>
+    <button id="downloadLastAudioBtn" class="secondary" disabled>最後の音声をダウンロード</button>
+    <button id="downloadAllAudioBtn" class="secondary">音声を順番にダウンロード</button>
+  </div>
+  <p id="countInfo" class="small">0件</p>
+  <div style="overflow:auto;max-height:280px">
+    <table id="dataTable"></table>
+  </div>
+  <div style="margin-top:12px">
+    <p class="small"><b>iPhone用：</b>「CSVを画面に表示」を押すと、下にCSV本文が出ます。長押し→全選択→コピー、または「CSVをコピー」を使ってください。</p>
+    <textarea id="csvTextBox" readonly placeholder="ここにsummary CSV本文が表示されます。"></textarea>
+    <p class="small"><b>frame_debug:</b> 各サンプルの5msごとの分類・energy・ZCR・高域近似です。</p>
+    <textarea id="frameCsvTextBox" readonly placeholder="ここにframe_debug CSV本文が表示されます。"></textarea>
+  </div>
+</section>
+
+<section class="card">
+  <h2>推奨固定パラメーター</h2>
+  <p class="small">
+各特徴量について、す群とつ群の平均・標準偏差を出し、単独特徴量の暫定識別率を計算します。
+推奨値は「す群平均」と「つ群平均」の中点です。まずは各ラベル10件以上を目安にしてください。
+</p>
+  <div id="summaryBox" class="small">データ不足です。</div>
+  <h3>学生用にコピーする固定パラメーター案</h3>
+  <textarea id="paramText" readonly></textarea>
+</section>
+</div>
+
+<script>
+"use strict";
+const $=id=>document.getElementById(id);
+let stream=null,recorder=null,chunks=[],audioCtx=null,analyser=null,vadInterval=null,heardVoice=false,silenceStart=null;
+let lastMetrics=null;
+let samplesData = JSON.parse(localStorage.getItem("tsuSuCalibrationDataV1")||"[]");
+let frameDebugData = JSON.parse(localStorage.getItem("tsuSuFrameDebugDataV1")||"[]");
+let lastDebugFrames = [];
+let lastSampleId = "";
+let lastAudioBlob = null;
+let lastAudioMime = "audio/webm";
+let dbPromise = openAudioDB();
+
+$("wordSelect").onchange=()=>{ $("displayWord").textContent=$("wordSelect").value; const w=$("wordSelect").value; $("labelSelect").value = w.startsWith("つ") ? "tsu" : "su"; };
+$("recordBtn").onclick=()=>startRecording();
+$("stopBtn").onclick=()=>stopRecording();
+$("saveSuBtn").onclick=()=>saveCurrent("su");
+$("saveTsuBtn").onclick=()=>saveCurrent("tsu");
+$("clearBtn").onclick=()=>{ if(confirm("全データを削除しますか？")){samplesData=[]; frameDebugData=[]; persist(); clearAudioDB(); renderAll();} };
+$("downloadBtn").onclick=downloadCSV;
+$("showCsvBtn").onclick=showCSVText;
+$("copyCsvBtn").onclick=copyCSVText;
+$("showFrameCsvBtn").onclick=showFrameCSVText;
+$("copyFrameCsvBtn").onclick=copyFrameCSVText;
+$("downloadLastAudioBtn").onclick=downloadLastAudio;
+$("downloadAllAudioBtn").onclick=downloadAllAudioSequential;
+
+renderAll();
+
+async function startRecording(){
+  try{
+    chunks=[]; heardVoice=false; silenceStart=null; lastMetrics=null;
+    $("saveSuBtn").disabled=true; $("saveTsuBtn").disabled=true;
+    if(!stream){
+      stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
+    }
+    if(audioCtx&&audioCtx.state==="suspended") await audioCtx.resume();
+    let options={};
+    if(MediaRecorder.isTypeSupported&&MediaRecorder.isTypeSupported("audio/webm")) options={mimeType:"audio/webm"};
+    else if(MediaRecorder.isTypeSupported&&MediaRecorder.isTypeSupported("audio/mp4")) options={mimeType:"audio/mp4"};
+    recorder=new MediaRecorder(stream,options);
+    recorder.ondataavailable=e=>{if(e.data&&e.data.size>0)chunks.push(e.data)};
+    recorder.onstop=async()=>{
+      stopVAD(); setButtons(false); $("status").textContent="解析中...";
+      const blob=new Blob(chunks,{type:recorder.mimeType||"audio/webm"});
+      lastAudioBlob = blob; lastAudioMime = blob.type || "audio/webm"; $("downloadLastAudioBtn").disabled=false; await analyzeBlob(blob);
+    };
+    recorder.start(); setButtons(true); startVAD();
+    $("status").textContent="録音中。発音後、無音で自動停止します。";
+  }catch(e){ alert("マイク開始失敗: "+e.message); }
+}
+function setButtons(rec){$("recordBtn").disabled=rec;$("stopBtn").disabled=!rec;}
+function startVAD(){
+  audioCtx=audioCtx||new(window.AudioContext||window.webkitAudioContext)();
+  const source=audioCtx.createMediaStreamSource(stream);
+  analyser=audioCtx.createAnalyser(); analyser.fftSize=1024; source.connect(analyser);
+  const buf=new Float32Array(analyser.fftSize), threshold=0.018, silenceMs=800;
+  stopVAD();
+  vadInterval=setInterval(()=>{
+    analyser.getFloatTimeDomainData(buf);
+    let sum=0; for(const x of buf)sum+=x*x;
+    const rms=Math.sqrt(sum/buf.length), now=performance.now();
+    if(rms>threshold){heardVoice=true; silenceStart=null;}
+    else if(heardVoice){ if(silenceStart===null)silenceStart=now; if(now-silenceStart>silenceMs)stopRecording(); }
+  },80);
+}
+function stopVAD(){if(vadInterval)clearInterval(vadInterval);vadInterval=null;}
+function stopRecording(){stopVAD(); if(recorder&&recorder.state==="recording")recorder.stop();}
+
+async function analyzeBlob(blob){
+  try{
+    const arrayBuffer=await blob.arrayBuffer();
+    const ctx=new(window.AudioContext||window.webkitAudioContext)();
+    const audioBuffer=await ctx.decodeAudioData(arrayBuffer);
+    const samples=audioBuffer.getChannelData(0), sr=audioBuffer.sampleRate;
+    const framesAll=makeFrames(samples,sr);
+    const frames=trimFramesKeepStart(framesAll);
+    const target=findInitialTargetRange(frames,samples,sr);
+    const targetFrames=frames.filter(f=>f.start>=target.start&&f.end<=target.end);
+    const classified=classifyHeadFrames(targetFrames.length?targetFrames:frames);
+    const segments=mergeSegments(classified);
+    const m=computeHeadMetrics(samples,sr,classified,segments,target);
+    lastMetrics=m;
+    drawWaveRegion(samples,sr,target.start,target.end);
+    drawSegments(segments);
+    renderFrameDebug(classified);
+    showMetrics(m);
+    const guess=guessByCurrentParams(m);
+    $("mGuess").textContent=guess;
+    $("lastResult").classList.remove("hidden");
+    $("lastResult").innerHTML=`録音完了：rise=${m.rise.toFixed(2)}, fric=${Math.round(m.fricMs)}ms, burst=${m.burstScore.toFixed(2)}<br>正解ラベルを確認して保存してください。`;
+    $("saveSuBtn").disabled=false; $("saveTsuBtn").disabled=false;
+    $("status").textContent="解析完了。正解ラベルで保存できます。";
+  }catch(e){
+    console.error(e); $("status").textContent="解析エラー："+(e.message||e);
+  }
+}
+
+async function saveCurrent(label){
+  if(!lastMetrics) return;
+  const id = makeSampleId(samplesData.length + 1);
+  lastSampleId = id;
+  const item={
+    id,
+    time:new Date().toISOString(),
+    word:$("wordSelect").value,
+    label,
+    audioFile:"",
+    rise:+lastMetrics.rise.toFixed(4),
+    fricMs:+lastMetrics.fricMs.toFixed(2),
+    burst:+lastMetrics.burstScore.toFixed(4),
+    centroid:+lastMetrics.centroid.toFixed(2),
+    highRatio:+lastMetrics.highRatio.toFixed(4),
+    fricTotalMs:+(lastMetrics.fricTotalMs||0).toFixed(2),
+    riseDurationMs:+(lastMetrics.riseDurationMs||0).toFixed(2),
+    steadyDecayMs:+(lastMetrics.steadyDecayMs||0).toFixed(2),
+    riseSlope:+(lastMetrics.riseSlope||0).toFixed(6)
+  };
+  samplesData.push(item);
+  saveFrameDebugRows(item);
+  persist(); renderAll();
+  $("status").textContent=`保存しました：${item.word} / ${label==="tsu"?"つ":"す"}（summary ${samplesData.length}件、frame ${frameDebugData.length}行）`;
+}
+
+function saveFrameDebugRows(item){
+  if(!lastDebugFrames || !lastDebugFrames.length) return;
+  const rows = lastDebugFrames.map((f,i)=>({
+    id:item.id,
+    time:item.time,
+    word:item.word,
+    label:item.label,
+    frame:i,
+    startMs:+f.relStartMs.toFixed(2),
+    endMs:+f.relEndMs.toFixed(2),
+    class:f.label,
+    energy:+f.en.toFixed(5),
+    zcr:+f.zcr.toFixed(5),
+    hp:+(f.hp||0).toFixed(5)
+  }));
+  frameDebugData.push(...rows);
+}
+
+function makeSampleId(n){
+  return "sample_" + String(n).padStart(4,"0");
+}
+
+function persist(){localStorage.setItem("tsuSuCalibrationDataV1",JSON.stringify(samplesData));localStorage.setItem("tsuSuFrameDebugDataV1",JSON.stringify(frameDebugData));}
+
+function makeFrames(samples,sr){
+  const frameMs=5, size=Math.max(96,Math.floor(sr*frameMs/1000)), frames=[];
+  for(let i=0;i+size<samples.length;i+=size){
+    let energy=0,zc=0,diffEnergy=0,prev=samples[i]||0;
+    for(let j=0;j<size;j++){
+      const x=samples[i+j]||0; energy+=x*x;
+      const d=x-prev; diffEnergy+=d*d; prev=x;
+      if(j>0&&Math.sign(samples[i+j])!==Math.sign(samples[i+j-1]))zc++;
+    }
+    energy=Math.sqrt(energy/size); diffEnergy=Math.sqrt(diffEnergy/size);
+    const highProxy=energy>0?diffEnergy/energy:0;
+    frames.push({start:i/sr,end:(i+size)/sr,i0:i,i1:i+size,energy,diffEnergy,highProxy,zcr:zc/size,en:0,hp:0,label:"other"});
+  }
+  const maxE=Math.max(...frames.map(f=>f.energy),1e-9), maxH=Math.max(...frames.map(f=>f.highProxy),1e-9);
+  frames.forEach(f=>{f.en=f.energy/maxE; f.hp=f.highProxy/maxH;});
+  return frames;
+}
+function trimFramesKeepStart(frames){
+  const active=frames.filter(f=>f.en>0.04);
+  if(!active.length)return frames;
+  const first=frames.indexOf(active[0]), last=frames.indexOf(active[active.length-1]);
+  return frames.slice(Math.max(0,first-8),Math.min(frames.length,last+5));
+}
+function findInitialTargetRange(frames,samples,sr){
+  const active=frames.find(f=>f.en>0.045);
+  if(!active)return{start:0,end:Math.min(samples.length/sr,0.30)};
+  const start=Math.max(0,active.start-0.055), end=Math.min(samples.length/sr,start+0.28);
+  return{start,end};
+}
+function classifyHeadFrames(frames){
+  return frames.map(f=>{
+    const vowel=f.en>0.12&&f.zcr<0.075&&(f.hp||0)<0.58;
+    if(vowel)return{...f,label:"vowel"};
+    const fric=(f.zcr>0.065&&f.en>0.025)||((f.hp||0)>0.50&&f.en>0.025);
+    if(fric)return{...f,label:"fric"};
+    return{...f,label:"other"};
+  });
+}
+function mergeSegments(frames){
+  const segs=[];
+  for(const f of frames){
+    const last=segs[segs.length-1];
+    if(!last||last.label!==f.label)segs.push({label:f.label,start:f.start,end:f.end,frames:[f]});
+    else{last.end=f.end; last.frames.push(f);}
+  }
+  const merged=[];
+  for(const s of segs){
+    const dur=s.end-s.start;
+    if(dur<0.012&&merged.length){merged[merged.length-1].end=s.end; merged[merged.length-1].frames.push(...s.frames);}
+    else merged.push(s);
+  }
+  return merged;
+}
+function computeFricEnvelopeFeatures(frames){
+  // v3.0:
+  // 摩擦区間の包絡線から rise / steady+decay を推定する。
+  // 参照発想：
+  // [s] は摩擦がゆっくり長く続きやすく、
+  // [ts] は摩擦の立ち上がりが急で rise が短くなりやすい。
+  //
+  // 注意：
+  // ここでは厳密な音声学的分節ではなく、ブラウザ内で動く簡易推定。
+  const fricIdx = frames.map((f,i)=>f.label==="fric"?i:-1).filter(i=>i>=0);
+  if(!fricIdx.length){
+    return {
+      fricTotalMs:0,
+      riseDurationMs:0,
+      steadyDecayMs:0,
+      riseSlope:0,
+      fricPeakNorm:0,
+      fricStartMs:null,
+      fricEndMs:null
+    };
+  }
+
+  // 最初の fric 連続区間を取る
+  const start = fricIdx[0];
+  let end = start;
+  for(let i=start+1;i<frames.length;i++){
+    if(frames[i].label==="fric") end=i;
+    else break;
+  }
+
+  const seg = frames.slice(start,end+1);
+  if(!seg.length){
+    return {
+      fricTotalMs:0,
+      riseDurationMs:0,
+      steadyDecayMs:0,
+      riseSlope:0,
+      fricPeakNorm:0,
+      fricStartMs:null,
+      fricEndMs:null
+    };
+  }
+
+  // 包絡線：zcr と hp を主に使い、energy正規化も少しだけ使う
+  // hp は簡易高域近似、zcr は零交差率。
+  // どちらも値域はおおむね0〜1に近い。
+  const scores = seg.map(f=>{
+    const normEn = (typeof f.normEn === "number") ? f.normEn : f.en;
+    return Math.max(0, Math.min(1, 0.45*f.zcr + 0.45*(f.hp||0) + 0.10*normEn));
+  });
+
+  const peak = Math.max(...scores, 1e-9);
+  const norm = scores.map(x=>x/peak);
+
+  // 立ち上がり終了点：
+  // peakの70%に初めて到達したところ。
+  // ただし短すぎる場合もあるので最低1フレームは確保。
+  let riseEnd = norm.findIndex(x=>x>=0.70);
+  if(riseEnd < 0) riseEnd = Math.min(norm.length-1, 1);
+
+  const frameMs = Math.round((seg[0].end-seg[0].start)*1000) || 5;
+  const fricTotalMs = norm.length * frameMs;
+  const riseDurationMs = Math.max(frameMs, (riseEnd+1)*frameMs);
+  const steadyDecayMs = Math.max(0, fricTotalMs - riseDurationMs);
+
+  // rise slope：最初から70%到達までの平均上昇速度
+  const firstVal = norm[0] || 0;
+  const riseVal = norm[riseEnd] || peak;
+  const riseSlope = riseDurationMs > 0 ? (riseVal - firstVal) / riseDurationMs : 0;
+
+  return {
+    fricTotalMs,
+    riseDurationMs,
+    steadyDecayMs,
+    riseSlope,
+    fricPeakNorm:peak,
+    fricStartMs:Math.round((seg[0].start - frames[0].start)*1000),
+    fricEndMs:Math.round((seg[seg.length-1].end - frames[0].start)*1000)
+  };
+}
+
+function computeHeadMetrics(samples,sr,frames,segments,target){
+  const activeIndex=frames.findIndex(f=>f.en>0.045);
+  let rise=0;
+  if(activeIndex>=0){
+    const before=frames.slice(Math.max(0,activeIndex-5),activeIndex);
+    const after=frames.slice(activeIndex,Math.min(frames.length,activeIndex+5));
+    const beforeAvg=before.length?before.reduce((a,f)=>a+f.en,0)/before.length:0.01;
+    const afterAvg=after.length?after.reduce((a,f)=>a+f.en,0)/after.length:0;
+    rise=afterAvg/Math.max(0.01,beforeAvg);
+  }
+  let fricSeg=null;
+  const firstFricIndex=segments.findIndex(s=>s.label==="fric");
+  if(firstFricIndex>=0){
+    fricSeg=segments[firstFricIndex];
+    if((fricSeg.end-fricSeg.start)>0.13)fricSeg={...fricSeg,end:fricSeg.start+0.13};
+  }
+  const fric=fricSeg?fricSeg.end-fricSeg.start:0;
+  let burstScore=0;
+  if(activeIndex>=0){
+    const early=frames.slice(activeIndex,Math.min(frames.length,activeIndex+4));
+    for(const f of early){
+      const score=Math.max(f.zcr/0.12,(f.hp||0)/0.65)*f.en;
+      if(score>burstScore)burstScore=score;
+    }
+  }
+  let centroid=0,highRatio=0;
+  if(fricSeg){
+    const i0=Math.max(0,Math.floor(fricSeg.start*sr)), i1=Math.min(samples.length,Math.floor(fricSeg.end*sr));
+    const spec=spectrumSummary(samples.slice(i0,i1),sr);
+    centroid=spec.centroid; highRatio=spec.highRatio;
+  }
+  const env = computeFricEnvelopeFeatures(frames);
+  return{rise,fric,fricMs:fric*1000,burstScore,centroid,highRatio,...env};
+}
+function spectrumSummary(x,sr){
+  const N=1024, buf=new Float32Array(N);
+  for(let i=0;i<N;i++){const w=0.5-0.5*Math.cos(2*Math.PI*i/(N-1));buf[i]=(x[i]||0)*w;}
+  const mags=dftMagnitude(buf);let total=0,weighted=0,high=0;
+  for(let k=1;k<mags.length;k++){
+    const freq=k*sr/N;if(freq<1000||freq>9000)continue;
+    const m=mags[k];total+=m;weighted+=freq*m;if(freq>=5000&&freq<=9000)high+=m;
+  }
+  return{centroid:total?weighted/total:0,highRatio:total?high/total:0};
+}
+function dftMagnitude(x){
+  const N=x.length,half=N/2,mags=new Float32Array(half);
+  for(let k=0;k<half;k++){let re=0,im=0;for(let n=0;n<N;n++){const a=-2*Math.PI*k*n/N;re+=x[n]*Math.cos(a);im+=x[n]*Math.sin(a);}mags[k]=Math.sqrt(re*re+im*im);}
+  return mags;
+}
+
+function calcStats(){
+  const su=samplesData.filter(d=>d.label==="su"), tsu=samplesData.filter(d=>d.label==="tsu");
+  const features=["rise","fricMs","burst","centroid","highRatio","fricTotalMs","riseDurationMs","steadyDecayMs","riseSlope"];
+  const stats={su:{n:su.length},tsu:{n:tsu.length},features:{}};
+  for(const f of features){
+    const a=su.map(d=>+d[f]).filter(Number.isFinite), b=tsu.map(d=>+d[f]).filter(Number.isFinite);
+    stats.features[f]={su:summary(a),tsu:summary(b)};
+    const mid=(stats.features[f].su.mean+stats.features[f].tsu.mean)/2;
+    stats.features[f].threshold=Number.isFinite(mid)?mid:NaN;
+    stats.features[f].direction=(stats.features[f].tsu.mean > stats.features[f].su.mean) ? "higher_is_tsu" : "lower_is_tsu";
+    stats.features[f].acc=featureAccuracy(f,mid,stats.features[f].direction);
+  }
+  return stats;
+}
+function summary(arr){
+  if(!arr.length)return{n:0,mean:NaN,sd:NaN,min:NaN,max:NaN};
+  const mean=arr.reduce((a,b)=>a+b,0)/arr.length;
+  const sd=arr.length>1?Math.sqrt(arr.reduce((a,b)=>a+(b-mean)**2,0)/(arr.length-1)):0;
+  return{n:arr.length,mean,sd,min:Math.min(...arr),max:Math.max(...arr)};
+}
+function featureAccuracy(f,thr,dir){
+  if(!Number.isFinite(thr)||!samplesData.length)return NaN;
+  let ok=0;
+  for(const d of samplesData){
+    const val=+d[f];
+    const pred=(dir==="higher_is_tsu") ? (val>=thr?"tsu":"su") : (val<=thr?"tsu":"su");
+    if(pred===d.label)ok++;
+  }
+  return ok/samplesData.length;
+}
+function bestParams(){
+  const st=calcStats();
+  const f=st.features;
+  return {
+    riseThreshold: safeNum(f.rise.threshold),
+    riseDirection: f.rise.direction,
+    fricThresholdMs: safeNum(f.fricMs.threshold),
+    fricDirection: f.fricMs.direction,
+    burstThreshold: safeNum(f.burst.threshold),
+    burstDirection: f.burst.direction,
+    centroidThresholdHz: safeNum(f.centroid.threshold),
+    centroidDirection: f.centroid.direction,
+    highRatioThreshold: safeNum(f.highRatio.threshold),
+    highRatioDirection: f.highRatio.direction,
+    sampleCount: samplesData.length,
+    suCount: st.su.n,
+    tsuCount: st.tsu.n
+  };
+}
+function safeNum(x){return Number.isFinite(x)?+x.toFixed(4):null;}
+
+function guessByCurrentParams(m){
+  if(samplesData.filter(d=>d.label==="su").length<3||samplesData.filter(d=>d.label==="tsu").length<3)return "データ不足";
+  const p=bestParams();
+  let score=0,total=0;
+  score += vote(m.rise,p.riseThreshold,p.riseDirection); total++;
+  score += vote(m.fricMs,p.fricThresholdMs,p.fricDirection); total++;
+  score += vote(m.burstScore,p.burstThreshold,p.burstDirection); total++;
+  if(p.highRatioThreshold!==null){score+=vote(m.highRatio,p.highRatioThreshold,p.highRatioDirection);total++;}
+  const r=score/total;
+  if(r>=0.62)return "つ寄り";
+  if(r<=0.38)return "す寄り";
+  return "要確認";
+}
+function vote(val,thr,dir){
+  if(thr===null||!Number.isFinite(val))return 0.5;
+  const tsu=(dir==="higher_is_tsu") ? val>=thr : val<=thr;
+  return tsu?1:0;
+}
+
+function renderAll(){
+  renderTable(); renderSummary();
+}
+function renderTable(){
+  $("countInfo").textContent=`summary 全${samplesData.length}件（す ${samplesData.filter(d=>d.label==="su").length}件／つ ${samplesData.filter(d=>d.label==="tsu").length}件）／frame ${frameDebugData.length}行`;
+  const rows=samplesData.slice(-80).reverse();
+  $("dataTable").innerHTML = `<tr><th>ID</th><th>語</th><th>正解</th><th>立上</th><th>摩擦ms</th><th>riseDur</th><th>steadyDecay</th><th>破裂</th><th>重心Hz</th><th>高域</th></tr>`+
+    rows.map(d=>`<tr><td>${d.id||""}</td><td>${d.word}</td><td>${d.label==="tsu"?"つ":"す"}</td><td>${d.rise}</td><td>${d.fricMs}</td><td>${d.riseDurationMs??""}</td><td>${d.steadyDecayMs??""}</td><td>${d.burst}</td><td>${Math.round(d.centroid)}</td><td>${d.highRatio}</td></tr>`).join("");
+}
+function renderSummary(){
+  const suN=samplesData.filter(d=>d.label==="su").length, tsuN=samplesData.filter(d=>d.label==="tsu").length;
+  if(suN<2||tsuN<2){
+    $("summaryBox").innerHTML=`データ不足です。最低でも「す」「つ」各2件、目安として各10件以上集めてください。`;
+    $("paramText").value="";
+    return;
+  }
+  const st=calcStats(), names={rise:"立ち上がり",fricMs:"摩擦時間ms",burst:"破裂スコア",centroid:"重心Hz",highRatio:"高域比率",fricTotalMs:"摩擦合計ms",riseDurationMs:"rise duration",steadyDecayMs:"steady+decay",riseSlope:"rise slope"};
+  let html=`<table><tr><th>特徴量</th><th>す平均</th><th>つ平均</th><th>推奨閾値</th><th>方向</th><th>単独識別率</th></tr>`;
+  for(const key of Object.keys(st.features)){
+    const x=st.features[key];
+    html+=`<tr><td>${names[key]}</td><td>${fmt(x.su.mean)}</td><td>${fmt(x.tsu.mean)}</td><td>${fmt(x.threshold)}</td><td>${x.direction==="higher_is_tsu"?"高いほどつ":"低いほどつ"}</td><td>${Number.isFinite(x.acc)?Math.round(x.acc*100)+"%":"-"}</td></tr>`;
+  }
+  html+=`</table>`;
+  $("summaryBox").innerHTML=html;
+  const p=bestParams();
+  $("paramText").value = `const FIXED_PARAMS = ${JSON.stringify(p,null,2)};`;
+}
+function fmt(x){return Number.isFinite(x)?(Math.abs(x)>50?x.toFixed(1):x.toFixed(3)):"-";}
+
+function openAudioDB(){
+  return new Promise((resolve,reject)=>{
+    const req = indexedDB.open("tsuSuAudioDB", 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if(!db.objectStoreNames.contains("audio")){
+        db.createObjectStore("audio", {keyPath:"id"});
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function saveAudioBlob(id, blob, meta){
+  const db = await dbPromise;
+  return new Promise((resolve,reject)=>{
+    const tx = db.transaction("audio","readwrite");
+    tx.objectStore("audio").put({id, blob, meta, mime:blob.type || "audio/webm"});
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function getAudioRecord(id){
+  const db = await dbPromise;
+  return new Promise((resolve,reject)=>{
+    const tx = db.transaction("audio","readonly");
+    const req = tx.objectStore("audio").get(id);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function clearAudioDB(){
+  try{
+    const db = await dbPromise;
+    const tx = db.transaction("audio","readwrite");
+    tx.objectStore("audio").clear();
+  }catch(e){
+    console.warn(e);
+  }
+}
+
+function downloadBlob(blob, filename){
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download=filename;
+  a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 1000);
+}
+
+function downloadLastAudio(){
+  if(!lastAudioBlob){
+    alert("まだ音声がありません。");
+    return;
+  }
+  const word = $("wordSelect").value || "recording";
+  const label = $("labelSelect").value || "unknown";
+  downloadBlob(lastAudioBlob, `last_${word}_${label}.${audioExt(lastAudioMime)}`);
+}
+
+async function downloadAllAudioSequential(){
+  if(!samplesData.length){
+    alert("保存データがありません。");
+    return;
+  }
+  alert("保存済み音声を順番にダウンロードします。ブラウザが複数ダウンロードの確認を出すことがあります。");
+  for(const d of samplesData){
+    const rec = await getAudioRecord(d.id);
+    if(rec && rec.blob){
+      downloadBlob(rec.blob, d.audioFile || `${d.id}.webm`);
+      await new Promise(r=>setTimeout(r, 500));
+    }
+  }
+}
+
+function makeCSVText(){
+  const header=["id","time","word","label","audioFile","rise","fricMs","burst","centroid","highRatio","fricTotalMs","riseDurationMs","steadyDecayMs","riseSlope"];
+  const lines=[header.join(",")].concat(samplesData.map(d=>header.map(k=>csvCell(d[k]??"")).join(",")));
+  return lines.join("\n");
+}
+function csvCell(v){
+  const s=String(v);
+  return '"' + s.replace(/"/g,'""') + '"';
+}
+function showCSVText(){
+  const text = makeCSVText();
+  const box = $("csvTextBox");
+  box.value = text;
+  box.focus();
+  box.select();
+  $("status").textContent = `CSVを表示しました（${samplesData.length}件）。テキストボックスをコピーできます。`;
+}
+async function copyCSVText(){
+  const text = makeCSVText();
+  const box = $("csvTextBox");
+  box.value = text;
+  try{
+    await navigator.clipboard.writeText(text);
+    $("status").textContent = `CSVをコピーしました（${samplesData.length}件）。`;
+  }catch(e){
+    box.focus();
+    box.select();
+    $("status").textContent = "自動コピーできませんでした。下のCSVを長押ししてコピーしてください。";
+  }
+}
+
+function makeFrameCSVText(){
+  const header=["id","time","word","label","frame","startMs","endMs","class","energy","zcr","hp"];
+  const lines=[header.join(",")].concat(frameDebugData.map(d=>header.map(k=>csvCell(d[k]??"")).join(",")));
+  return lines.join("\n");
+}
+function showFrameCSVText(){
+  const text = makeFrameCSVText();
+  const box = $("frameCsvTextBox");
+  box.value = text;
+  box.focus();
+  box.select();
+  $("status").textContent = `frame_debug CSVを表示しました（${frameDebugData.length}行）。`;
+}
+async function copyFrameCSVText(){
+  const text = makeFrameCSVText();
+  const box = $("frameCsvTextBox");
+  box.value = text;
+  try{ await navigator.clipboard.writeText(text); $("status").textContent = `frame_debug CSVをコピーしました（${frameDebugData.length}行）。`; }
+  catch(e){ box.focus(); box.select(); $("status").textContent = "自動コピーできませんでした。下のframe_debug CSVを長押ししてコピーしてください。"; }
+}
+
+function downloadCSV(){
+  const csv = makeCSVText();
+  const blob=new Blob([csv],{type:"text/csv;charset=utf-8"});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download="tsu_su_calibration.csv";
+  a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 1000);
+}
+
+function renderFrameDebug(frames){
+  if(!frames || !frames.length){
+    lastDebugFrames = [];
+    return;
+  }
+  const baseStart = frames[0].start;
+  lastDebugFrames = frames.map(f=>({
+    ...f,
+    relStartMs:(f.start-baseStart)*1000,
+    relEndMs:(f.end-baseStart)*1000
+  }));
+
+  const fricCount = frames.filter(f=>f.label==="fric").length;
+  const vowelCount = frames.filter(f=>f.label==="vowel").length;
+  const otherCount = frames.filter(f=>f.label==="other").length;
+  $("dbgFricCount").textContent = fricCount + " frames / " + Math.round(fricCount*5) + "ms";
+  $("dbgVowelCount").textContent = vowelCount + " frames / " + Math.round(vowelCount*5) + "ms";
+  $("dbgOtherCount").textContent = otherCount + " frames / " + Math.round(otherCount*5) + "ms";
+
+  let firstRun = 0;
+  const firstFric = frames.findIndex(f=>f.label==="fric");
+  if(firstFric >= 0){
+    for(let i=firstFric;i<frames.length;i++){
+      if(frames[i].label === "fric") firstRun++;
+      else break;
+    }
+  }
+  $("dbgFirstFricRun").textContent = firstRun ? `${firstRun} frames / ${Math.round(firstRun*5)}ms` : "なし";
+
+  const rows = lastDebugFrames.map((f,i)=>{
+    const ms0 = Math.round(f.relStartMs);
+    const ms1 = Math.round(f.relEndMs);
+    const lab = f.label === "fric" ? "摩擦" : (f.label === "vowel" ? "母音" : "その他");
+    return `<tr>
+      <td>${i}</td>
+      <td>${ms0}-${ms1}</td>
+      <td>${lab}</td>
+      <td>${f.en.toFixed(3)}</td>
+      <td>${f.zcr.toFixed(3)}</td>
+      <td>${(f.hp||0).toFixed(3)}</td>
+    </tr>`;
+  }).join("");
+
+  $("frameDebugTable").innerHTML =
+    `<tr><th>#</th><th>ms</th><th>分類</th><th>energy</th><th>ZCR</th><th>高域近似</th></tr>` + rows;
+}
+
+function showMetrics(m){
+  $("mRise").textContent=m.rise?m.rise.toFixed(2):"-";
+  $("mFric").textContent=Math.round(m.fricMs)+" ms";
+  $("mBurst").textContent=m.burstScore.toFixed(2);
+  $("mCentroid").textContent=m.centroid?Math.round(m.centroid)+" Hz":"-";
+  $("mHigh").textContent=m.highRatio?Math.round(m.highRatio*100)+" %":"-";
+  if($("mRiseDur")) $("mRiseDur").textContent = Math.round(m.riseDurationMs||0) + " ms";
+  if($("mSteadyDecay")) $("mSteadyDecay").textContent = Math.round(m.steadyDecayMs||0) + " ms";
+  if($("mRiseSlope")) $("mRiseSlope").textContent = (m.riseSlope||0).toFixed(4);
+}
+function drawWaveRegion(samples,sr,startSec,endSec){
+  const c=$("waveCanvas"),g=c.getContext("2d");g.clearRect(0,0,c.width,c.height);
+  g.fillStyle="#fff";g.fillRect(0,0,c.width,c.height);
+  const i0=Math.max(0,Math.floor(startSec*sr)), i1=Math.min(samples.length,Math.floor(endSec*sr));
+  const region=samples.slice(i0,i1), mid=c.height/2;
+  g.strokeStyle="#e2d7c8";g.beginPath();g.moveTo(0,mid);g.lineTo(c.width,mid);g.stroke();
+  if(!region.length)return;
+  let peak=0;for(const v of region)peak=Math.max(peak,Math.abs(v));
+  const gain=Math.min(10,Math.max(1.8,0.9/(peak||0.001)));
+  g.strokeStyle="#2b2118";g.lineWidth=1.5;g.beginPath();
+  const step=Math.max(1,Math.ceil(region.length/c.width));
+  for(let x=0;x<c.width;x++){
+    let min=1,max=-1;
+    for(let j=0;j<step;j++){const v=(region[x*step+j]||0)*gain;if(v<min)min=v;if(v>max)max=v;}
+    min=Math.max(-1,min);max=Math.min(1,max);
+    g.moveTo(x,mid+min*mid*0.94);g.lineTo(x,mid+max*mid*0.94);
+  }
+  g.stroke();
+}
+function drawSegments(segs){
+  const bar=$("segmentBar");
+  if(!segs.length){bar.innerHTML='<div class="seg other" style="width:100%">なし</div>';return;}
+  const total=segs[segs.length-1].end-segs[0].start||1;
+  const label={fric:"摩擦",vowel:"母音",other:"その他"};
+  bar.innerHTML=segs.map(s=>{
+    const cls=s.label==="fric"?"fric":(s.label==="vowel"?"vowel":"other");
+    const w=Math.max(2,(s.end-s.start)/total*100), ms=Math.round((s.end-s.start)*1000);
+    return `<div class="seg ${cls}" style="width:${w}%">${label[s.label]||"その他"}<br>${ms}ms</div>`;
+  }).join("");
+}
+</script>
+</body>
+</html>
