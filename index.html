@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>語頭 つ・す 摩擦検出デバッグ v3.1.1-fill-fric-gaps</title>
+<title>語頭 つ・す 摩擦検出デバッグ v3.2-head-prefric-features</title>
 <style>
 :root{
   --bg:#f7f3ea;--card:#fffdf8;--ink:#2b2118;--muted:#756a5d;
@@ -49,7 +49,7 @@ th{background:#f1e7d8}
 </head>
 <body>
 <div class="wrap">
-<h1>語頭 つ・す 摩擦検出デバッグ v3.1.1-fill-fric-gaps</h1>
+<h1>語頭 つ・す 摩擦検出デバッグ v3.2-head-prefric-features</h1>
 <p class="small">
 語頭の「す／つ」専用です。録音後に、実際に発音した音を「す」「つ」で入力してください。
 データをためると、固定パラメーター候補を自動計算します。音声もスマホ内のIndexedDBに保存します。摩擦がどこで切れているかを5msごとに保存・表示します。summary.csv と frame_debug.csv をコピーできます。摩擦包絡線から rise duration / steady+decay duration を推定します。サーバーには送信しません。
@@ -130,6 +130,9 @@ th{background:#f1e7d8}
     <div class="metric"><b>onset jump</b><span id="mOnsetJump">-</span></div>
     <div class="metric"><b>pre-fric energy</b><span id="mPreEnergy">-</span></div>
     <div class="metric"><b>filled gaps</b><span id="mFilledGapCount">-</span></div>
+    <div class="metric"><b>pre max HP</b><span id="mPreMaxHP">-</span></div>
+    <div class="metric"><b>pre max ZCR</b><span id="mPreMaxZCR">-</span></div>
+    <div class="metric"><b>head HP×ZCR 40</b><span id="mHeadHPZCR40">-</span></div>
   </div>
 </section>
 
@@ -286,7 +289,12 @@ async function saveCurrent(label){
     fricTotalMs:+(lastMetrics.fricTotalMs||0).toFixed(2),
     riseDurationMs:+(lastMetrics.riseDurationMs||0).toFixed(2),
     steadyDecayMs:+(lastMetrics.steadyDecayMs||0).toFixed(2),
-    riseSlope:+(lastMetrics.riseSlope||0).toFixed(6), onsetJump:+(lastMetrics.onsetJump||0).toFixed(6), preFricScore:+(lastMetrics.preFricScore||0).toFixed(6), filledGapCount:+(lastMetrics.filledGapCount||0)
+    riseSlope:+(lastMetrics.riseSlope||0).toFixed(6), onsetJump:+(lastMetrics.onsetJump||0).toFixed(6), preFricScore:+(lastMetrics.preFricScore||0).toFixed(6), filledGapCount:+(lastMetrics.filledGapCount||0),
+    preFricMaxHP:+(lastMetrics.preFricMaxHP||0).toFixed(6),
+    preFricMaxZCR:+(lastMetrics.preFricMaxZCR||0).toFixed(6),
+    headHP40:+(lastMetrics.headHP40||0).toFixed(6),
+    headZCR40:+(lastMetrics.headZCR40||0).toFixed(6),
+    headHPZCR40:+(lastMetrics.headHPZCR40||0).toFixed(6)
   };
   samplesData.push(item);
   saveFrameDebugRows(item);
@@ -399,7 +407,38 @@ function fillShortFricGapsForFeatures(frames){
   return out;
 }
 
+function computeHeadPreFricFeatures(frames){
+  // v3.2:
+  // 語頭40msとfric開始前20msの特徴量を保存する。
+  // 目的：
+  // - 語頭の「つ」は閉鎖そのものより、閉鎖→破裂→摩擦への移行が出る可能性がある
+  // - 1フレーム最大値だけでなく、語頭40msの積分値も見る
+
+  const firstFric = frames.findIndex(f=>f.label==="fric");
+  const frameMs = frames.length ? Math.round((frames[0].end-frames[0].start)*1000) || 5 : 5;
+  const headN = Math.max(1, Math.round(40 / frameMs));
+  const preN = Math.max(1, Math.round(20 / frameMs));
+
+  const head = frames.slice(0, Math.min(headN, frames.length));
+
+  const preStart = firstFric >= 0 ? Math.max(0, firstFric - preN) : 0;
+  const preEnd = firstFric >= 0 ? firstFric : Math.min(preN, frames.length);
+  const pre = frames.slice(preStart, preEnd);
+
+  const sum = (arr, fn) => arr.reduce((a,x)=>a+fn(x),0);
+  const max = (arr, fn) => arr.length ? Math.max(...arr.map(fn)) : 0;
+
+  return {
+    preFricMaxHP: max(pre, f => f.hp || 0),
+    preFricMaxZCR: max(pre, f => f.zcr || 0),
+    headHP40: sum(head, f => f.hp || 0),
+    headZCR40: sum(head, f => f.zcr || 0),
+    headHPZCR40: sum(head, f => (f.hp || 0) * (f.zcr || 0))
+  };
+}
+
 function computeFricEnvelopeFeatures(frames){
+  const headPre = computeHeadPreFricFeatures(frames);
   frames = fillShortFricGapsForFeatures(frames);
   // v3.0:
   // 摩擦区間の包絡線から rise / steady+decay を推定する。
@@ -412,6 +451,7 @@ function computeFricEnvelopeFeatures(frames){
   const fricIdx = frames.map((f,i)=>f.label==="fric"?i:-1).filter(i=>i>=0);
   if(!fricIdx.length){
     return {
+      ...headPre,
       fricTotalMs:0,
       riseDurationMs:0,
       steadyDecayMs:0,
@@ -433,6 +473,7 @@ function computeFricEnvelopeFeatures(frames){
   const seg = frames.slice(start,end+1);
   if(!seg.length){
     return {
+      ...headPre,
       fricTotalMs:0,
       riseDurationMs:0,
       steadyDecayMs:0,
@@ -480,6 +521,7 @@ function computeFricEnvelopeFeatures(frames){
   const onsetJump = postScore - preScore;
 
   return {
+    ...headPre,
     fricTotalMs,
     riseDurationMs,
     steadyDecayMs,
@@ -626,7 +668,7 @@ function renderSummary(){
     $("paramText").value="";
     return;
   }
-  const st=calcStats(), names={rise:"立ち上がり",fricMs:"摩擦時間ms",burst:"破裂スコア",centroid:"重心Hz",highRatio:"高域比率",fricTotalMs:"摩擦合計ms",riseDurationMs:"rise duration",steadyDecayMs:"steady+decay",riseSlope:"rise slope",onsetJump:"onset jump",preFricScore:"pre-fric score",filledGapCount:"filled gaps"};
+  const st=calcStats(), names={rise:"立ち上がり",fricMs:"摩擦時間ms",burst:"破裂スコア",centroid:"重心Hz",highRatio:"高域比率",fricTotalMs:"摩擦合計ms",riseDurationMs:"rise duration",steadyDecayMs:"steady+decay",riseSlope:"rise slope",onsetJump:"onset jump",preFricScore:"pre-fric score",filledGapCount:"filled gaps",preFricMaxHP:"preFric max HP",preFricMaxZCR:"preFric max ZCR",headHP40:"head HP 40",headZCR40:"head ZCR 40",headHPZCR40:"head HP×ZCR 40"};
   let html=`<table><tr><th>特徴量</th><th>す平均</th><th>つ平均</th><th>推奨閾値</th><th>方向</th><th>単独識別率</th></tr>`;
   for(const key of Object.keys(st.features)){
     const x=st.features[key];
@@ -717,7 +759,7 @@ async function downloadAllAudioSequential(){
 }
 
 function makeCSVText(){
-  const header=["id","time","word","label","audioFile","rise","fricMs","burst","centroid","highRatio","fricTotalMs","riseDurationMs","steadyDecayMs","riseSlope","onsetJump","preFricScore","filledGapCount"];
+  const header=["id","time","word","label","audioFile","rise","fricMs","burst","centroid","highRatio","fricTotalMs","riseDurationMs","steadyDecayMs","riseSlope","onsetJump","preFricScore","filledGapCount","preFricMaxHP","preFricMaxZCR","headHP40","headZCR40","headHPZCR40"];
   const lines=[header.join(",")].concat(samplesData.map(d=>header.map(k=>csvCell(d[k]??"")).join(",")));
   return lines.join("\n");
 }
@@ -837,6 +879,9 @@ function showMetrics(m){
   if($("mOnsetJump")) $("mOnsetJump").textContent = (m.onsetJump||0).toFixed(4);
   if($("mPreEnergy")) $("mPreEnergy").textContent = (m.preFricScore||0).toFixed(4);
   if($("mFilledGapCount")) $("mFilledGapCount").textContent = String(m.filledGapCount||0);
+  if($("mPreMaxHP")) $("mPreMaxHP").textContent = (m.preFricMaxHP||0).toFixed(4);
+  if($("mPreMaxZCR")) $("mPreMaxZCR").textContent = (m.preFricMaxZCR||0).toFixed(4);
+  if($("mHeadHPZCR40")) $("mHeadHPZCR40").textContent = (m.headHPZCR40||0).toFixed(4);
 }
 function drawWaveRegion(samples,sr,startSec,endSec){
   const c=$("waveCanvas"),g=c.getContext("2d");g.clearRect(0,0,c.width,c.height);
