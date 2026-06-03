@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>語頭 つ・す 摩擦検出デバッグ v3.2-head-prefric-features</title>
+<title>語頭 つ・す 摩擦検出デバッグ v3.3-classifier-v1</title>
 <style>
 :root{
   --bg:#f7f3ea;--card:#fffdf8;--ink:#2b2118;--muted:#756a5d;
@@ -49,7 +49,7 @@ th{background:#f1e7d8}
 </head>
 <body>
 <div class="wrap">
-<h1>語頭 つ・す 摩擦検出デバッグ v3.2-head-prefric-features</h1>
+<h1>語頭 つ・す 摩擦検出デバッグ v3.3-classifier-v1</h1>
 <p class="small">
 語頭の「す／つ」専用です。録音後に、実際に発音した音を「す」「つ」で入力してください。
 データをためると、固定パラメーター候補を自動計算します。音声もスマホ内のIndexedDBに保存します。摩擦がどこで切れているかを5msごとに保存・表示します。summary.csv と frame_debug.csv をコピーできます。摩擦包絡線から rise duration / steady+decay duration を推定します。サーバーには送信しません。
@@ -133,6 +133,9 @@ th{background:#f1e7d8}
     <div class="metric"><b>pre max HP</b><span id="mPreMaxHP">-</span></div>
     <div class="metric"><b>pre max ZCR</b><span id="mPreMaxZCR">-</span></div>
     <div class="metric"><b>head HP×ZCR 40</b><span id="mHeadHPZCR40">-</span></div>
+    <div class="metric"><b>判別器v1</b><span id="mClassifierGuess">-</span></div>
+    <div class="metric"><b>つ確率</b><span id="mTsuProb">-</span></div>
+    <div class="metric"><b>PC1</b><span id="mClassifierPC1">-</span></div>
   </div>
 </section>
 
@@ -409,7 +412,7 @@ function fillShortFricGapsForFeatures(frames){
 
 function computeHeadPreFricFeatures(frames){
   // v3.2:
-  // 語頭40msとfric開始前20msの特徴量を保存する。
+  // 語頭40msとfric開始前20msの特徴量を保存し、暫定判別器で「つ/す/判断不能」を出す。
   // 目的：
   // - 語頭の「つ」は閉鎖そのものより、閉鎖→破裂→摩擦への移行が出る可能性がある
   // - 1フレーム最大値だけでなく、語頭40msの積分値も見る
@@ -658,7 +661,7 @@ function renderAll(){
 function renderTable(){
   $("countInfo").textContent=`summary 全${samplesData.length}件（す ${samplesData.filter(d=>d.label==="su").length}件／つ ${samplesData.filter(d=>d.label==="tsu").length}件）／frame ${frameDebugData.length}行`;
   const rows=samplesData.slice(-80).reverse();
-  $("dataTable").innerHTML = `<tr><th>ID</th><th>語</th><th>正解</th><th>立上</th><th>摩擦ms</th><th>riseDur</th><th>steadyDecay</th><th>破裂</th><th>重心Hz</th><th>高域</th></tr>`+
+  $("dataTable").innerHTML = `<tr><th>ID</th><th>語</th><th>正解</th><th>判別</th><th>つ確率</th><th>摩擦ms</th><th>破裂</th><th>onsetJump</th><th>PC1</th></tr>`+
     rows.map(d=>`<tr><td>${d.id||""}</td><td>${d.word}</td><td>${d.label==="tsu"?"つ":"す"}</td><td>${d.rise}</td><td>${d.fricMs}</td><td>${d.riseDurationMs??""}</td><td>${d.steadyDecayMs??""}</td><td>${d.burst}</td><td>${Math.round(d.centroid)}</td><td>${d.highRatio}</td></tr>`).join("");
 }
 function renderSummary(){
@@ -759,7 +762,7 @@ async function downloadAllAudioSequential(){
 }
 
 function makeCSVText(){
-  const header=["id","time","word","label","audioFile","rise","fricMs","burst","centroid","highRatio","fricTotalMs","riseDurationMs","steadyDecayMs","riseSlope","onsetJump","preFricScore","filledGapCount","preFricMaxHP","preFricMaxZCR","headHP40","headZCR40","headHPZCR40"];
+  const header=["id","time","word","label","audioFile","rise","fricMs","burst","centroid","highRatio","fricTotalMs","riseDurationMs","steadyDecayMs","riseSlope","onsetJump","preFricScore","filledGapCount","preFricMaxHP","preFricMaxZCR","headHP40","headZCR40","headHPZCR40","classifierGuess","tsuProb","classifierPC1","classifierScore"];
   const lines=[header.join(",")].concat(samplesData.map(d=>header.map(k=>csvCell(d[k]??"")).join(",")));
   return lines.join("\n");
 }
@@ -867,6 +870,74 @@ function renderFrameDebug(frames){
     `<tr><th>#</th><th>ms</th><th>分類</th><th>energy</th><th>ZCR</th><th>高域近似</th></tr>` + rows;
 }
 
+
+const CLASSIFIER_V1 = {
+  intercept: 0.196043169441,
+  coef: {
+    burst: -0.240478153364,
+    onsetJump: 0.436168473728,
+    PC1: 0.48082571228
+  },
+  pcMean: {
+    preFricMaxHP: 0.676804433333,
+    preFricMaxZCR: 0.3461111,
+    headHP40: 3.87643456667,
+    headZCR40: 1.79944446667,
+    headHPZCR40: 1.09727543333
+  },
+  pcStd: {
+    preFricMaxHP: 0.223162914025,
+    preFricMaxZCR: 0.147297909811,
+    headHP40: 0.941630016823,
+    headZCR40: 0.505207466362,
+    headHPZCR40: 0.52870388104
+  },
+  pcLoading: {
+    preFricMaxHP: 0.355151892435,
+    preFricMaxZCR: 0.362480994604,
+    headHP40: 0.495510724053,
+    headZCR40: 0.497032377276,
+    headHPZCR40: 0.499902590649
+  }
+};
+
+function sigmoid(x) {
+  return 1 / (1 + Math.exp(-x));
+}
+
+function computeClassifierV1(m) {
+  if(!m || (m.fricTotalMs || 0) < 40) {
+    return {
+      classifierGuess: "判断不能",
+      tsuProb: null,
+      classifierPC1: null,
+      classifierScore: null
+    };
+  }
+
+  const fs = ["preFricMaxHP","preFricMaxZCR","headHP40","headZCR40","headHPZCR40"];
+  let pc1 = 0;
+  for(const f of fs) {
+    const z = ((m[f] || 0) - CLASSIFIER_V1.pcMean[f]) / CLASSIFIER_V1.pcStd[f];
+    pc1 += z * CLASSIFIER_V1.pcLoading[f];
+  }
+
+  const score =
+    CLASSIFIER_V1.intercept +
+    CLASSIFIER_V1.coef.burst * (m.burstScore || m.burst || 0) +
+    CLASSIFIER_V1.coef.onsetJump * (m.onsetJump || 0) +
+    CLASSIFIER_V1.coef.PC1 * pc1;
+
+  const p = sigmoid(score);
+  return {
+    classifierGuess: p >= 0.5 ? "つ" : "す",
+    tsuProb: p,
+    classifierPC1: pc1,
+    classifierScore: score
+  };
+}
+
+
 function showMetrics(m){
   $("mRise").textContent=m.rise?m.rise.toFixed(2):"-";
   $("mFric").textContent=Math.round(m.fricMs)+" ms";
@@ -882,6 +953,10 @@ function showMetrics(m){
   if($("mPreMaxHP")) $("mPreMaxHP").textContent = (m.preFricMaxHP||0).toFixed(4);
   if($("mPreMaxZCR")) $("mPreMaxZCR").textContent = (m.preFricMaxZCR||0).toFixed(4);
   if($("mHeadHPZCR40")) $("mHeadHPZCR40").textContent = (m.headHPZCR40||0).toFixed(4);
+  const cls = computeClassifierV1(m);
+  if($("mClassifierGuess")) $("mClassifierGuess").textContent = cls.classifierGuess;
+  if($("mTsuProb")) $("mTsuProb").textContent = cls.tsuProb===null ? "-" : Math.round(cls.tsuProb*100) + " %";
+  if($("mClassifierPC1")) $("mClassifierPC1").textContent = cls.classifierPC1===null ? "-" : cls.classifierPC1.toFixed(3);
 }
 function drawWaveRegion(samples,sr,startSec,endSec){
   const c=$("waveCanvas"),g=c.getContext("2d");g.clearRect(0,0,c.width,c.height);
