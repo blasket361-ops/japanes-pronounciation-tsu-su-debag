@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>語頭 つ・す 摩擦検出デバッグ v3.1-onset-slope</title>
+<title>語頭 つ・す 摩擦検出デバッグ v3.1.1-fill-fric-gaps</title>
 <style>
 :root{
   --bg:#f7f3ea;--card:#fffdf8;--ink:#2b2118;--muted:#756a5d;
@@ -49,7 +49,7 @@ th{background:#f1e7d8}
 </head>
 <body>
 <div class="wrap">
-<h1>語頭 つ・す 摩擦検出デバッグ v3.1-onset-slope</h1>
+<h1>語頭 つ・す 摩擦検出デバッグ v3.1.1-fill-fric-gaps</h1>
 <p class="small">
 語頭の「す／つ」専用です。録音後に、実際に発音した音を「す」「つ」で入力してください。
 データをためると、固定パラメーター候補を自動計算します。音声もスマホ内のIndexedDBに保存します。摩擦がどこで切れているかを5msごとに保存・表示します。summary.csv と frame_debug.csv をコピーできます。摩擦包絡線から rise duration / steady+decay duration を推定します。サーバーには送信しません。
@@ -129,6 +129,7 @@ th{background:#f1e7d8}
     <div class="metric"><b>rise slope</b><span id="mRiseSlope">-</span></div>
     <div class="metric"><b>onset jump</b><span id="mOnsetJump">-</span></div>
     <div class="metric"><b>pre-fric energy</b><span id="mPreEnergy">-</span></div>
+    <div class="metric"><b>filled gaps</b><span id="mFilledGapCount">-</span></div>
   </div>
 </section>
 
@@ -285,7 +286,7 @@ async function saveCurrent(label){
     fricTotalMs:+(lastMetrics.fricTotalMs||0).toFixed(2),
     riseDurationMs:+(lastMetrics.riseDurationMs||0).toFixed(2),
     steadyDecayMs:+(lastMetrics.steadyDecayMs||0).toFixed(2),
-    riseSlope:+(lastMetrics.riseSlope||0).toFixed(6), onsetJump:+(lastMetrics.onsetJump||0).toFixed(6), preFricScore:+(lastMetrics.preFricScore||0).toFixed(6)
+    riseSlope:+(lastMetrics.riseSlope||0).toFixed(6), onsetJump:+(lastMetrics.onsetJump||0).toFixed(6), preFricScore:+(lastMetrics.preFricScore||0).toFixed(6), filledGapCount:+(lastMetrics.filledGapCount||0)
   };
   samplesData.push(item);
   saveFrameDebugRows(item);
@@ -370,7 +371,36 @@ function mergeSegments(frames){
   }
   return merged;
 }
+function fillShortFricGapsForFeatures(frames){
+  // 特徴量計算専用の穴埋め。
+  // frame_debug表示用の元分類はできるだけ変えず、
+  // rise/steady/decay計算時だけ短い other を fric に寄せる。
+  //
+  // fric other fric → fric fric fric
+  // fric other other fric → fric fric fric fric
+  const out = frames.map(f=>({...f, filledForFeatures:false}));
+
+  for(let i=1;i<out.length-1;i++){
+    if(out[i-1].label==="fric" && out[i].label!=="fric" && out[i+1].label==="fric"){
+      out[i].label="fric";
+      out[i].filledForFeatures=true;
+    }
+  }
+
+  for(let i=1;i<out.length-2;i++){
+    if(out[i-1].label==="fric" && out[i].label!=="fric" && out[i+1].label!=="fric" && out[i+2].label==="fric"){
+      out[i].label="fric";
+      out[i+1].label="fric";
+      out[i].filledForFeatures=true;
+      out[i+1].filledForFeatures=true;
+    }
+  }
+
+  return out;
+}
+
 function computeFricEnvelopeFeatures(frames){
+  frames = fillShortFricGapsForFeatures(frames);
   // v3.0:
   // 摩擦区間の包絡線から rise / steady+decay を推定する。
   // 参照発想：
@@ -456,7 +486,7 @@ function computeFricEnvelopeFeatures(frames){
     riseSlope,
     fricPeakNorm:peak,
     fricStartMs:Math.round((seg[0].start - frames[0].start)*1000),
-    fricEndMs:Math.round((seg[seg.length-1].end - frames[0].start)*1000), onsetJump:onsetJump, preFricScore:preScore
+    fricEndMs:Math.round((seg[seg.length-1].end - frames[0].start)*1000), onsetJump:onsetJump, preFricScore:preScore, filledGapCount:frames.filter(f=>f.filledForFeatures).length
   };
 }
 
@@ -596,7 +626,7 @@ function renderSummary(){
     $("paramText").value="";
     return;
   }
-  const st=calcStats(), names={rise:"立ち上がり",fricMs:"摩擦時間ms",burst:"破裂スコア",centroid:"重心Hz",highRatio:"高域比率",fricTotalMs:"摩擦合計ms",riseDurationMs:"rise duration",steadyDecayMs:"steady+decay",riseSlope:"rise slope",onsetJump:"onset jump",preFricScore:"pre-fric score"};
+  const st=calcStats(), names={rise:"立ち上がり",fricMs:"摩擦時間ms",burst:"破裂スコア",centroid:"重心Hz",highRatio:"高域比率",fricTotalMs:"摩擦合計ms",riseDurationMs:"rise duration",steadyDecayMs:"steady+decay",riseSlope:"rise slope",onsetJump:"onset jump",preFricScore:"pre-fric score",filledGapCount:"filled gaps"};
   let html=`<table><tr><th>特徴量</th><th>す平均</th><th>つ平均</th><th>推奨閾値</th><th>方向</th><th>単独識別率</th></tr>`;
   for(const key of Object.keys(st.features)){
     const x=st.features[key];
@@ -687,7 +717,7 @@ async function downloadAllAudioSequential(){
 }
 
 function makeCSVText(){
-  const header=["id","time","word","label","audioFile","rise","fricMs","burst","centroid","highRatio","fricTotalMs","riseDurationMs","steadyDecayMs","riseSlope","onsetJump","preFricScore"];
+  const header=["id","time","word","label","audioFile","rise","fricMs","burst","centroid","highRatio","fricTotalMs","riseDurationMs","steadyDecayMs","riseSlope","onsetJump","preFricScore","filledGapCount"];
   const lines=[header.join(",")].concat(samplesData.map(d=>header.map(k=>csvCell(d[k]??"")).join(",")));
   return lines.join("\n");
 }
@@ -806,6 +836,7 @@ function showMetrics(m){
   if($("mRiseSlope")) $("mRiseSlope").textContent = (m.riseSlope||0).toFixed(4);
   if($("mOnsetJump")) $("mOnsetJump").textContent = (m.onsetJump||0).toFixed(4);
   if($("mPreEnergy")) $("mPreEnergy").textContent = (m.preFricScore||0).toFixed(4);
+  if($("mFilledGapCount")) $("mFilledGapCount").textContent = String(m.filledGapCount||0);
 }
 function drawWaveRegion(samples,sr,startSec,endSec){
   const c=$("waveCanvas"),g=c.getContext("2d");g.clearRect(0,0,c.width,c.height);
